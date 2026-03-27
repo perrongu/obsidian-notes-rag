@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a **personal fork** of [proofgeist/obsidian-notes-rag](https://github.com/proofgeist/obsidian-notes-rag), maintained at [perrongu/obsidian-notes-rag](https://github.com/perrongu/obsidian-notes-rag).
 
-- **Branch**: `custom/main` (all work happens here, based on upstream tag `v1.1.2`)
-- **Upstream**: `proofgeist/obsidian-notes-rag` (remote named `upstream`)
-- **Do not push to `main`** — it mirrors upstream
+- **Branch `dev`**: active development branch — all work happens here
+- **Branch `custom/main`**: stable/deployed version — merge from `dev` when ready, then reinstall
+- **Branch `main`**: mirrors upstream — do not push to it
+- **Upstream**: `proofgeist/obsidian-notes-rag` (remote named `upstream`), forked at tag `v1.1.2`
 
 Custom modifications vs upstream v1.1.2:
 - macOS Keychain integration for API key resolution (`config.py`)
@@ -53,7 +54,13 @@ obsidian-rag index --clear                 # full reindex (only if chunking logi
 
 ## Critical: Python Requirement
 
-**Always use `--python /opt/homebrew/bin/python3.13`** when installing via `uv tool install`. The python.org Framework Python does not compile sqlite3 with `enable_load_extension`, which breaks sqlite-vec entirely.
+**Always use `--python /opt/homebrew/bin/python3.13`** for both `uv tool install` and `uv venv`. The python.org Framework Python does not compile sqlite3 with `enable_load_extension`, which breaks sqlite-vec entirely (runtime and tests).
+
+```bash
+# Dev venv setup (if .venv is missing or broken)
+uv venv --python /opt/homebrew/bin/python3.13
+uv sync --dev
+```
 
 ## Architecture
 
