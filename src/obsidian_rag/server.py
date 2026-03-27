@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from .config import load_config, Config
-from .indexer import create_embedder, Embedder, VaultIndexer
+from .config import Config, load_config
+from .indexer import Embedder, VaultIndexer, create_embedder
 from .store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -17,9 +16,9 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("obsidian-rag")
 
 # Global instances (lazy initialized — server runs single-threaded via stdio)
-_config: Optional[Config] = None
-_embedder: Optional[Embedder] = None
-_store: Optional[VectorStore] = None
+_config: Config | None = None
+_embedder: Embedder | None = None
+_store: VectorStore | None = None
 
 
 def get_config() -> Config:
@@ -76,11 +75,7 @@ def get_store() -> VectorStore:
 
 
 @mcp.tool()
-def search_notes(
-    query: str,
-    limit: Optional[int] = None,
-    note_type: Optional[str] = None
-) -> list[dict]:
+def search_notes(query: str, limit: int | None = None, note_type: str | None = None) -> list[dict]:
     """Search notes using semantic similarity.
 
     Args:
@@ -110,7 +105,7 @@ def search_notes(
                 "heading": r["metadata"].get("heading") or None,
                 "content": r["content"][:500] if len(r["content"]) > 500 else r["content"],
                 "similarity": round(1 - r["distance"], 3),
-                "type": r["metadata"].get("type", "note")
+                "type": r["metadata"].get("type", "note"),
             }
             for r in results
             if threshold <= 0 or (1 - r["distance"]) >= threshold
@@ -121,7 +116,7 @@ def search_notes(
 
 
 @mcp.tool()
-def get_similar(note_path: str, limit: Optional[int] = None) -> list[dict]:
+def get_similar(note_path: str, limit: int | None = None) -> list[dict]:
     """Find notes similar to the given note.
 
     Args:
@@ -147,17 +142,14 @@ def get_similar(note_path: str, limit: Optional[int] = None) -> list[dict]:
         note_embedding = embedder.embed(note_content[:8000])
         all_results = store.search(note_embedding, limit=limit + 10)
 
-        similar = [
-            r for r in all_results
-            if r["metadata"]["file_path"] != note_path
-        ][:limit]
+        similar = [r for r in all_results if r["metadata"]["file_path"] != note_path][:limit]
 
         return [
             {
                 "file_path": r["metadata"]["file_path"],
                 "heading": r["metadata"].get("heading") or None,
                 "preview": r["content"][:200] if len(r["content"]) > 200 else r["content"],
-                "similarity": round(1 - r["distance"], 3)
+                "similarity": round(1 - r["distance"], 3),
             }
             for r in similar
         ]
@@ -167,7 +159,7 @@ def get_similar(note_path: str, limit: Optional[int] = None) -> list[dict]:
 
 
 @mcp.tool()
-def get_note_context(note_path: str, limit: Optional[int] = None) -> dict:
+def get_note_context(note_path: str, limit: int | None = None) -> dict:
     """Get a note and its related context.
 
     Args:
@@ -194,7 +186,7 @@ def get_note_context(note_path: str, limit: Optional[int] = None) -> dict:
         return {
             "file_path": note_path,
             "content": note_content,
-            "similar_notes": similar if not (similar and "error" in similar[0]) else []
+            "similar_notes": similar if not (similar and "error" in similar[0]) else [],
         }
     except Exception as e:
         logger.error("get_note_context failed: %s", e)
@@ -217,7 +209,7 @@ def get_stats() -> dict:
 
 
 @mcp.tool()
-def reindex(clear: bool = False, path_filter: Optional[str] = None) -> dict:
+def reindex(clear: bool = False, path_filter: str | None = None) -> dict:
     """Re-index the Obsidian vault.
 
     Args:
@@ -276,7 +268,7 @@ def reindex(clear: bool = False, path_filter: Optional[str] = None) -> dict:
             "total_in_store": store.get_stats()["count"],
             "errors": errors if errors else None,
             "path_filter": path_filter,
-            "cleared": clear
+            "cleared": clear,
         }
     except Exception as e:
         logger.error("reindex failed: %s", e)

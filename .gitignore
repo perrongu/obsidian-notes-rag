@@ -25,14 +25,27 @@ wheels/
 venv/
 ENV/
 
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.pyright/
+
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 
+# Secrets and environment
+.env
+.env.*
+
 # Project specific
 data/
+*.db
+*.sqlite
+*.log
 .claude/
 .atlas/
 

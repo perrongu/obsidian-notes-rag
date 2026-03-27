@@ -1,13 +1,11 @@
 """Tests for IndexerConfig, presets, and block preservation."""
 
-import pytest
-
 from obsidian_rag.indexer import (
+    _NEWLINE_MASK,
     IndexerConfig,
-    chunk_markdown,
     _protect_blocks,
     _restore_blocks,
-    _NEWLINE_MASK,
+    chunk_markdown,
 )
 
 
@@ -90,11 +88,13 @@ class TestIndexerConfigSerialization:
         assert cfg.preserve_latex_blocks is True
 
     def test_from_dict_with_overrides(self):
-        cfg = IndexerConfig.from_dict({
-            "preset": "math",
-            "chunk_size": 512,
-            "similarity_threshold": 0.30,
-        })
+        cfg = IndexerConfig.from_dict(
+            {
+                "preset": "math",
+                "chunk_size": 512,
+                "similarity_threshold": 0.30,
+            }
+        )
         assert cfg.chunk_size == 512
         assert cfg.similarity_threshold == 0.30
         assert cfg.preserve_latex_blocks is True  # from preset
@@ -191,12 +191,14 @@ class TestChunkMarkdownWithConfig:
         content = f"# H1\n\n{section}\n\n## H2\n\n{section}\n\n### H3\n\n{section}\n\n#### H4\n\n{section}"
         # depth=2: split on h1 and h2, h3/h4 stay glued to h2's chunk
         chunks_shallow = chunk_markdown(
-            content, "test.md",
+            content,
+            "test.md",
             config=IndexerConfig(chunk_size=400, heading_split_depth=2),
         )
         # depth=4: split on all heading levels
         chunks_deep = chunk_markdown(
-            content, "test.md",
+            content,
+            "test.md",
             config=IndexerConfig(chunk_size=400, heading_split_depth=4),
         )
         assert len(chunks_deep) >= len(chunks_shallow)
@@ -204,15 +206,12 @@ class TestChunkMarkdownWithConfig:
     def test_latex_blocks_stay_intact(self):
         padding = "Discussion text. " * 30  # ~500 chars of prose
         content = (
-            f"# Proof\n\n{padding}\n\n"
-            "$$\n\\begin{aligned}\nA &= B \\\\\nC &= D\n\\end{aligned}\n$$\n\n"
-            f"{padding}"
+            f"# Proof\n\n{padding}\n\n$$\n\\begin{{aligned}}\nA &= B \\\\\nC &= D\n\\end{{aligned}}\n$$\n\n{padding}"
         )
         cfg = IndexerConfig(preserve_latex_blocks=True, chunk_size=600)
         chunks = chunk_markdown(content, "test.md", config=cfg)
         assert len(chunks) > 1, "Content should be split into multiple chunks"
-        found = any("\\begin{aligned}" in c.content and "\\end{aligned}" in c.content
-                     for c in chunks)
+        found = any("\\begin{aligned}" in c.content and "\\end{aligned}" in c.content for c in chunks)
         assert found, "LaTeX aligned block was split across chunks"
 
     def test_empty_content(self):

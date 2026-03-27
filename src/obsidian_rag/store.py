@@ -5,12 +5,14 @@ from __future__ import annotations
 import sqlite3
 import struct
 import threading
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any
 
 import sqlite_vec
 
 from .indexer import Chunk
+
 
 def _serialize_f32(vec: Sequence[float]) -> bytes:
     """Serialize a list of floats to a compact bytes format for sqlite-vec."""
@@ -32,7 +34,7 @@ class VectorStore:
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)
 
-        self._dim: Optional[int] = None
+        self._dim: int | None = None
         self._ensure_metadata_table()
         self._try_load_vec_table()
 
@@ -58,9 +60,7 @@ class VectorStore:
     def _try_load_vec_table(self) -> None:
         """Try to detect the dimension from an existing vec table."""
         try:
-            row = self.db.execute(
-                "SELECT embedding FROM chunks_vec LIMIT 1"
-            ).fetchone()
+            row = self.db.execute("SELECT embedding FROM chunks_vec LIMIT 1").fetchone()
             if row is not None:
                 self._dim = len(row[0]) // 4  # 4 bytes per float32
         except sqlite3.OperationalError:
@@ -79,25 +79,38 @@ class VectorStore:
         """)
         self.db.commit()
 
-    def upsert_batch(self, chunks: List[Chunk], embeddings: Sequence[Sequence[float]]) -> None:
+    def upsert(self, chunk: Chunk, embedding: list[float]) -> None:
+        """Add or update a single chunk."""
+        self.upsert_batch([chunk], [embedding])
+
+    def upsert_batch(self, chunks: list[Chunk], embeddings: Sequence[Sequence[float]]) -> None:
         """Add or update multiple chunks."""
         if not chunks:
             return
         with self._lock:
             self._ensure_vec_table(len(embeddings[0]))
 
-            for chunk, embedding in zip(chunks, embeddings):
+            for chunk, embedding in zip(chunks, embeddings, strict=False):
                 meta = self._prepare_metadata(chunk)
-                self.db.execute("""
+                self.db.execute(
+                    """
                     INSERT OR REPLACE INTO chunks (id, file_path, heading, heading_level, type, tags, content)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (chunk.id, meta["file_path"], meta["heading"], meta["heading_level"],
-                      meta["type"], meta.get("tags", ""), chunk.content))
+                """,
+                    (
+                        chunk.id,
+                        meta["file_path"],
+                        meta["heading"],
+                        meta["heading_level"],
+                        meta["type"],
+                        meta.get("tags", ""),
+                        chunk.content,
+                    ),
+                )
 
                 self.db.execute("DELETE FROM chunks_vec WHERE id = ?", (chunk.id,))
                 self.db.execute(
-                    "INSERT INTO chunks_vec (id, embedding) VALUES (?, ?)",
-                    (chunk.id, _serialize_f32(embedding))
+                    "INSERT INTO chunks_vec (id, embedding) VALUES (?, ?)", (chunk.id, _serialize_f32(embedding))
                 )
 
             self.db.commit()
@@ -105,8 +118,9 @@ class VectorStore:
     def delete_by_file(self, file_path: str) -> None:
         """Delete all chunks from a specific file."""
         with self._lock:
-            ids = [row[0] for row in
-                   self.db.execute("SELECT id FROM chunks WHERE file_path = ?", (file_path,)).fetchall()]
+            ids = [
+                row[0] for row in self.db.execute("SELECT id FROM chunks WHERE file_path = ?", (file_path,)).fetchall()
+            ]
             if ids:
                 placeholders = ",".join("?" * len(ids))
                 self.db.execute(f"DELETE FROM chunks_vec WHERE id IN ({placeholders})", ids)
@@ -115,12 +129,7 @@ class VectorStore:
 
     _ALLOWED_FILTER_COLUMNS = frozenset({"type", "file_path", "heading", "tags"})
 
-    def search(
-        self,
-        query_embedding: List[float],
-        limit: int = 10,
-        where: Optional[Dict] = None
-    ) -> List[Dict]:
+    def search(self, query_embedding: list[float], limit: int = 10, where: dict | None = None) -> list[dict]:
         """Search for similar chunks."""
         with self._lock:
             if self._dim is None:
@@ -145,7 +154,8 @@ class VectorStore:
                 _FILTER_OVERFETCH_FACTOR = 5
                 fetch_limit = limit * _FILTER_OVERFETCH_FACTOR
 
-                rows = self.db.execute(f"""
+                rows = self.db.execute(
+                    f"""
                     SELECT c.id, c.file_path, c.heading, c.heading_level, c.type, c.tags, c.content, v.distance
                     FROM chunks_vec v
                     JOIN chunks c ON c.id = v.id
@@ -153,19 +163,51 @@ class VectorStore:
                       AND {where_clause}
                     ORDER BY v.distance
                     LIMIT ?
-                """, [query_bytes, fetch_limit] + params + [limit]).fetchall()
+                """,
+                    [query_bytes, fetch_limit] + params + [limit],
+                ).fetchall()
             else:
-                rows = self.db.execute("""
+                rows = self.db.execute(
+                    """
                     SELECT c.id, c.file_path, c.heading, c.heading_level, c.type, c.tags, c.content, v.distance
                     FROM chunks_vec v
                     JOIN chunks c ON c.id = v.id
                     WHERE v.embedding MATCH ? AND k = ?
                     ORDER BY v.distance
-                """, [query_bytes, limit]).fetchall()
+                """,
+                    [query_bytes, limit],
+                ).fetchall()
 
             results = []
             for row in rows:
-                results.append({
+                results.append(
+                    {
+                        "id": row[0],
+                        "metadata": {
+                            "file_path": row[1],
+                            "heading": row[2] or "",
+                            "heading_level": row[3],
+                            "type": row[4] or "note",
+                            "tags": row[5] or "",
+                        },
+                        "content": row[6],
+                        "distance": row[7],
+                    }
+                )
+            return results
+
+    def get_by_file(self, file_path: str) -> list[dict]:
+        """Get all chunks for a file path (direct lookup, no vector search)."""
+        with self._lock:
+            rows = self.db.execute(
+                """
+                SELECT id, file_path, heading, heading_level, type, tags, content
+                FROM chunks WHERE file_path = ?
+            """,
+                (file_path,),
+            ).fetchall()
+            return [
+                {
                     "id": row[0],
                     "metadata": {
                         "file_path": row[1],
@@ -175,28 +217,9 @@ class VectorStore:
                         "tags": row[5] or "",
                     },
                     "content": row[6],
-                    "distance": row[7],
-                })
-            return results
-
-    def get_by_file(self, file_path: str) -> List[Dict]:
-        """Get all chunks for a file path (direct lookup, no vector search)."""
-        with self._lock:
-            rows = self.db.execute("""
-                SELECT id, file_path, heading, heading_level, type, tags, content
-                FROM chunks WHERE file_path = ?
-            """, (file_path,)).fetchall()
-            return [{
-                "id": row[0],
-                "metadata": {
-                    "file_path": row[1],
-                    "heading": row[2] or "",
-                    "heading_level": row[3],
-                    "type": row[4] or "note",
-                    "tags": row[5] or "",
-                },
-                "content": row[6],
-            } for row in rows]
+                }
+                for row in rows
+            ]
 
     def get_stats(self) -> dict:
         """Get collection statistics."""
@@ -217,7 +240,7 @@ class VectorStore:
                 self._dim = None
             self.db.commit()
 
-    def _prepare_metadata(self, chunk: Chunk) -> Dict[str, Any]:
+    def _prepare_metadata(self, chunk: Chunk) -> dict[str, Any]:
         """Prepare metadata for storage."""
         meta = {
             "file_path": chunk.file_path,

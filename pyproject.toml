@@ -47,7 +47,28 @@ packages = ["src/obsidian_rag"]
 dev = [
     "pytest>=8.0.0",
     "pyright>=1.1.0",
+    "pre-commit>=4.0.0",
+    "ruff>=0.11.0",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "S", "B", "UP"]
+ignore = [
+    "E402",   # module-level imports after logging setup (intentional in cli.py, watcher.py)
+    "S101",   # assert used in tests
+    "S110",   # try-except-pass on best-effort notifications
+    "S324",   # md5 used for content hashing, not cryptography
+    "S603",   # subprocess without shell=True (intentional in cli.py)
+    "S607",   # partial executable path (intentional for osascript, launchctl)
+    "S608",   # SQL with ? placeholders flagged as injection (false positive)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]

@@ -1,22 +1,20 @@
 """Tests for VectorStore - defines the contract for the sqlite-vec backend."""
 
-import tempfile
 import threading
-from pathlib import Path
 
 import pytest
 
 from obsidian_rag.indexer import Chunk
 from obsidian_rag.store import VectorStore
 
-
 # Use 4-dimensional vectors for simplicity in tests.
 # Real embeddings are 768 or 1536 dims, but the logic is the same.
 DIM = 4
 
 
-def make_chunk(id: str, content: str, file_path: str, heading: str = "",
-               heading_level: int = 0, type: str = "note", tags: str = "") -> Chunk:
+def make_chunk(
+    id: str, content: str, file_path: str, heading: str = "", heading_level: int = 0, type: str = "note", tags: str = ""
+) -> Chunk:
     """Helper to create a Chunk with metadata."""
     meta = {"type": type}
     if tags:
@@ -89,9 +87,9 @@ class TestSearch:
             make_chunk("c3", "Not relevant", "c.md"),
         ]
         embeddings = [
-            [1.0, 0.0, 0.0, 0.0],   # closest to query
-            [0.7, 0.7, 0.0, 0.0],   # medium distance
-            [0.0, 0.0, 0.0, 1.0],   # far from query
+            [1.0, 0.0, 0.0, 0.0],  # closest to query
+            [0.7, 0.7, 0.0, 0.0],  # medium distance
+            [0.0, 0.0, 0.0, 1.0],  # far from query
         ]
         store.upsert_batch(chunks, embeddings)
 
@@ -165,8 +163,7 @@ class TestSearch:
         for r in results:
             similarity = 1 - r["distance"]
             assert 0.0 <= similarity <= 1.0, (
-                f"Similarity {similarity:.3f} out of range — "
-                f"distance metric may not be cosine"
+                f"Similarity {similarity:.3f} out of range — distance metric may not be cosine"
             )
 
     def test_empty_search(self, store):

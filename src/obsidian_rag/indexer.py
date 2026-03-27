@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterator, Optional, List, Dict, Tuple
 
 import httpx
 import yaml
@@ -38,14 +38,14 @@ class IndexerConfig:
     default_search_limit: int = 10
     default_similar_limit: int = 5
     default_context_limit: int = 5
-    extra_exclude_patterns: List[str] = field(default_factory=list)
+    extra_exclude_patterns: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if self.preset != "default":
             self._apply_preset_defaults()
 
     @classmethod
-    def _make_defaults(cls, preset: str = "default") -> "IndexerConfig":
+    def _make_defaults(cls, preset: str = "default") -> IndexerConfig:
         """Create a baseline instance with raw defaults (bypassing __post_init__)."""
         obj = object.__new__(cls)
         obj.preset = preset
@@ -72,14 +72,14 @@ class IndexerConfig:
             if getattr(self, k) == getattr(defaults, k):
                 setattr(self, k, v)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Serialize for TOML. Only includes fields that differ from preset defaults."""
         base = self._make_defaults(self.preset)
         if self.preset in _PRESETS:
             for k, v in _PRESETS[self.preset].items():
                 setattr(base, k, v)
 
-        out: Dict = {"preset": self.preset}
+        out: dict = {"preset": self.preset}
         for k in _SERIALIZABLE_FIELDS:
             val = getattr(self, k)
             if val != getattr(base, k):
@@ -87,7 +87,7 @@ class IndexerConfig:
         return out
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "IndexerConfig":
+    def from_dict(cls, data: dict) -> IndexerConfig:
         """Deserialize from a TOML ``[indexer]`` dict."""
         preset = data.get("preset", "default")
         cfg = cls(preset=preset)
@@ -100,14 +100,20 @@ class IndexerConfig:
 
 
 _SERIALIZABLE_FIELDS = [
-    "chunk_size", "chunk_overlap", "min_characters_per_chunk",
-    "heading_split_depth", "preserve_latex_blocks", "preserve_code_blocks",
+    "chunk_size",
+    "chunk_overlap",
+    "min_characters_per_chunk",
+    "heading_split_depth",
+    "preserve_latex_blocks",
+    "preserve_code_blocks",
     "similarity_threshold",
-    "default_search_limit", "default_similar_limit", "default_context_limit",
+    "default_search_limit",
+    "default_similar_limit",
+    "default_context_limit",
     "extra_exclude_patterns",
 ]
 
-_PRESETS: Dict[str, Dict] = {
+_PRESETS: dict[str, dict] = {
     "math": {
         "chunk_size": 1024,
         "min_characters_per_chunk": 80,
@@ -134,12 +140,12 @@ class Chunk:
     id: str
     content: str
     file_path: str
-    heading: Optional[str]
+    heading: str | None
     heading_level: int
-    metadata: Dict
+    metadata: dict
 
 
-def parse_frontmatter(content: str) -> Tuple[Dict, str]:
+def parse_frontmatter(content: str) -> tuple[dict, str]:
     """Extract YAML frontmatter from markdown content."""
     if not content.startswith("---"):
         return {}, content
@@ -204,32 +210,36 @@ def _restore_blocks(text: str) -> str:
 
 def _build_rules(cfg: IndexerConfig) -> RecursiveRules:
     """Build RecursiveRules according to heading_split_depth."""
-    levels: List[RecursiveLevel] = []
+    levels: list[RecursiveLevel] = []
 
     heading_delimiters = [
-        ("\n# ",      1),
-        ("\n## ",     2),
-        ("\n### ",    3),
-        ("\n#### ",   4),
-        ("\n##### ",  5),
+        ("\n# ", 1),
+        ("\n## ", 2),
+        ("\n### ", 3),
+        ("\n#### ", 4),
+        ("\n##### ", 5),
         ("\n###### ", 6),
     ]
     for delim, depth in heading_delimiters:
         if depth <= cfg.heading_split_depth:
             levels.append(RecursiveLevel(delimiters=delim, include_delim="next"))
 
-    levels.extend([
-        RecursiveLevel(delimiters="\n\n"),
-        RecursiveLevel(delimiters="\n"),
-        RecursiveLevel(delimiters=[". ", "! ", "? "]),
-        RecursiveLevel(whitespace=True),
-    ])
+    levels.extend(
+        [
+            RecursiveLevel(delimiters="\n\n"),
+            RecursiveLevel(delimiters="\n"),
+            RecursiveLevel(delimiters=[". ", "! ", "? "]),
+            RecursiveLevel(whitespace=True),
+        ]
+    )
 
     return RecursiveRules(levels=levels)
 
 
 @lru_cache(maxsize=16)
-def _get_chunker(chunk_size: int, chunk_overlap: int, min_characters_per_chunk: int, heading_split_depth: int) -> RecursiveChunker:
+def _get_chunker(
+    chunk_size: int, chunk_overlap: int, min_characters_per_chunk: int, heading_split_depth: int
+) -> RecursiveChunker:
     """Get or create a cached RecursiveChunker for the given parameters."""
     cfg = IndexerConfig(heading_split_depth=heading_split_depth)
     return RecursiveChunker(
@@ -245,8 +255,8 @@ _default_config = IndexerConfig()
 def chunk_markdown(
     content: str,
     file_path: str,
-    config: Optional[IndexerConfig] = None,
-) -> List[Chunk]:
+    config: IndexerConfig | None = None,
+) -> list[Chunk]:
     """Split markdown content into chunks using Chonkie RecursiveChunker.
 
     Args:
@@ -295,21 +305,23 @@ def chunk_markdown(
         chunk_id = _generate_chunk_id(file_path, heading, text, i)
         meta = {**frontmatter, "type": note_type, "file_path": file_path}
 
-        chunks.append(Chunk(
-            id=chunk_id,
-            content=text,
-            file_path=file_path,
-            heading=heading,
-            heading_level=heading_level,
-            metadata=meta,
-        ))
+        chunks.append(
+            Chunk(
+                id=chunk_id,
+                content=text,
+                file_path=file_path,
+                heading=heading,
+                heading_level=heading_level,
+                metadata=meta,
+            )
+        )
 
     return chunks
 
 
 def _generate_chunk_id(
     file_path: str,
-    heading: Optional[str],
+    heading: str | None,
     content: str,
     chunk_index: int = 0,
 ) -> str:
@@ -334,6 +346,7 @@ def _truncate_for_embedding(
     """
     try:
         import tiktoken
+
         try:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
@@ -355,20 +368,22 @@ class OpenAIEmbedder:
     _MAX_RETRIES = 3
     _RETRY_DELAYS = (1.0, 4.0, 16.0)
 
-    def __init__(self, model: str = "text-embedding-3-small", api_key: Optional[str] = None):
+    def __init__(self, model: str = "text-embedding-3-small", api_key: str | None = None):
         from openai import OpenAI
+
         self.client = OpenAI(api_key=api_key) if api_key else OpenAI()
         self.model = model
 
-    def _call_with_retry(self, texts: List[str]) -> list:
+    def _call_with_retry(self, texts: list[str]) -> list:
         """Call the embeddings API with exponential backoff on transient errors."""
         import time
-        from openai import RateLimitError, APITimeoutError, APIConnectionError, APIStatusError
+
+        from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
         for attempt in range(self._MAX_RETRIES):
             try:
                 return self.client.embeddings.create(input=texts, model=self.model)
-            except (RateLimitError, APITimeoutError, APIConnectionError) as e:
+            except (RateLimitError, APITimeoutError, APIConnectionError):
                 if attempt == self._MAX_RETRIES - 1:
                     raise
                 time.sleep(self._RETRY_DELAYS[attempt])
@@ -378,7 +393,7 @@ class OpenAIEmbedder:
                 time.sleep(self._RETRY_DELAYS[attempt])
         raise RuntimeError("unreachable")
 
-    def embed(self, text: str, task_type: str = "search_document") -> List[float]:
+    def embed(self, text: str, task_type: str = "search_document") -> list[float]:
         safe_text = _truncate_for_embedding(text, model=self.model)
         response = self._call_with_retry([safe_text])
         return response.data[0].embedding
@@ -386,19 +401,17 @@ class OpenAIEmbedder:
     # OpenAI allows max 300k tokens per request; use conservative sub-batches
     _MAX_TEXTS_PER_BATCH = 100
 
-    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
         safe_texts = [_truncate_for_embedding(t, model=self.model) for t in texts]
         if len(safe_texts) <= self._MAX_TEXTS_PER_BATCH:
             response = self._call_with_retry(safe_texts)
             return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
         # Sub-batch to stay under API token limits
-        all_embeddings: List[List[float]] = []
+        all_embeddings: list[list[float]] = []
         for i in range(0, len(safe_texts), self._MAX_TEXTS_PER_BATCH):
             batch = safe_texts[i : i + self._MAX_TEXTS_PER_BATCH]
             response = self._call_with_retry(batch)
-            all_embeddings.extend(
-                item.embedding for item in sorted(response.data, key=lambda x: x.index)
-            )
+            all_embeddings.extend(item.embedding for item in sorted(response.data, key=lambda x: x.index))
         return all_embeddings
 
     def close(self):
@@ -408,11 +421,7 @@ class OpenAIEmbedder:
 class OllamaEmbedder:
     """Generate embeddings using Ollama (local)."""
 
-    def __init__(
-        self,
-        base_url: str = "http://localhost:11434",
-        model: str = "nomic-embed-text"
-    ):
+    def __init__(self, base_url: str = "http://localhost:11434", model: str = "nomic-embed-text"):
         self.base_url = base_url
         self.model = model
         self.client = httpx.Client(timeout=60.0)
@@ -430,16 +439,15 @@ class OllamaEmbedder:
                 return "Query: "
         return ""
 
-    def embed(self, text: str, task_type: str = "search_document") -> List[float]:
+    def embed(self, text: str, task_type: str = "search_document") -> list[float]:
         prefix = self._get_prefix(task_type)
         response = self.client.post(
-            f"{self.base_url}/api/embeddings",
-            json={"model": self.model, "prompt": f"{prefix}{text}"}
+            f"{self.base_url}/api/embeddings", json={"model": self.model, "prompt": f"{prefix}{text}"}
         )
         response.raise_for_status()
         return response.json()["embedding"]
 
-    def embed_batch(self, texts: List[str], task_type: str = "search_document") -> List[List[float]]:
+    def embed_batch(self, texts: list[str], task_type: str = "search_document") -> list[list[float]]:
         return [self.embed(text, task_type) for text in texts]
 
     def close(self):
@@ -449,11 +457,7 @@ class OllamaEmbedder:
 class LMStudioEmbedder:
     """Generate embeddings using LM Studio (local, OpenAI-compatible API)."""
 
-    def __init__(
-        self,
-        base_url: str = "http://localhost:1234",
-        model: str = "text-embedding-nomic-embed-text-v1.5"
-    ):
+    def __init__(self, base_url: str = "http://localhost:1234", model: str = "text-embedding-nomic-embed-text-v1.5"):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.client = httpx.Client(timeout=60.0)
@@ -470,21 +474,19 @@ class LMStudioEmbedder:
                 return "Query: "
         return ""
 
-    def embed(self, text: str, task_type: str = "search_document") -> List[float]:
+    def embed(self, text: str, task_type: str = "search_document") -> list[float]:
         prefix = self._get_prefix(task_type)
         response = self.client.post(
-            f"{self.base_url}/v1/embeddings",
-            json={"model": self.model, "input": f"{prefix}{text}"}
+            f"{self.base_url}/v1/embeddings", json={"model": self.model, "input": f"{prefix}{text}"}
         )
         response.raise_for_status()
         return response.json()["data"][0]["embedding"]
 
-    def embed_batch(self, texts: List[str], task_type: str = "search_document") -> List[List[float]]:
+    def embed_batch(self, texts: list[str], task_type: str = "search_document") -> list[list[float]]:
         prefix = self._get_prefix(task_type)
         prefixed_texts = [f"{prefix}{t}" for t in texts]
         response = self.client.post(
-            f"{self.base_url}/v1/embeddings",
-            json={"model": self.model, "input": prefixed_texts}
+            f"{self.base_url}/v1/embeddings", json={"model": self.model, "input": prefixed_texts}
         )
         response.raise_for_status()
         data = response.json()["data"]
@@ -514,9 +516,9 @@ def is_ollama_running(base_url: str = "http://localhost:11434") -> bool:
         return False
 
 
-def get_lmstudio_models(base_url: str = "http://localhost:1234") -> List[str]:
+def get_lmstudio_models(base_url: str = "http://localhost:1234") -> list[str]:
     """Get list of available embedding models from LM Studio."""
-    embedding_keywords = ['embed', 'bge', 'minilm', 'e5', 'gte', 'instructor']
+    embedding_keywords = ["embed", "bge", "minilm", "e5", "gte", "instructor"]
     try:
         with httpx.Client(timeout=5.0) as client:
             response = client.get(f"{base_url.rstrip('/')}/v1/models")
@@ -533,9 +535,9 @@ def get_lmstudio_models(base_url: str = "http://localhost:1234") -> List[str]:
         return []
 
 
-def get_ollama_models(base_url: str = "http://localhost:11434") -> List[str]:
+def get_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
     """Get list of available embedding models from Ollama."""
-    embedding_keywords = ['embed', 'bge', 'minilm', 'e5', 'gte', 'instructor', 'nomic']
+    embedding_keywords = ["embed", "bge", "minilm", "e5", "gte", "instructor", "nomic"]
     try:
         with httpx.Client(timeout=5.0) as client:
             response = client.get(f"{base_url.rstrip('/')}/api/tags")
@@ -557,9 +559,9 @@ Embedder = OpenAIEmbedder | OllamaEmbedder | LMStudioEmbedder
 
 def create_embedder(
     provider: str = "openai",
-    model: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> Embedder:
     """Create an embedder instance for the specified provider."""
     if provider == "openai":
@@ -594,8 +596,8 @@ class VaultIndexer:
         self,
         vault_path,
         embedder: Embedder,
-        exclude_patterns: Optional[List[str]] = None,
-        config: Optional[IndexerConfig] = None,
+        exclude_patterns: list[str] | None = None,
+        config: IndexerConfig | None = None,
     ):
         self.vault_path = Path(vault_path)
         self.embedder = embedder
@@ -613,15 +615,19 @@ class VaultIndexer:
             ".git/**",
         ]
         if self.config.extra_exclude_patterns:
-            self.exclude_patterns = list(set(
-                self.exclude_patterns + self.config.extra_exclude_patterns
-            ))
+            self.exclude_patterns = list(set(self.exclude_patterns + self.config.extra_exclude_patterns))
 
     def iter_markdown_files(self) -> Iterator[Path]:
         """Iterate over all markdown files in the vault."""
         _excluded_dirs = {
-            ".obsidian", ".trash", ".venv", "node_modules",
-            "__pycache__", ".git", "build", "dist",
+            ".obsidian",
+            ".trash",
+            ".venv",
+            "node_modules",
+            "__pycache__",
+            ".git",
+            "build",
+            "dist",
         }
         for md_file in self.vault_path.rglob("*.md"):
             rel_path = md_file.relative_to(self.vault_path)
@@ -638,7 +644,7 @@ class VaultIndexer:
             if not skip:
                 yield md_file
 
-    def index_file(self, file_path: Path) -> List[Tuple[Chunk, List[float]]]:
+    def index_file(self, file_path: Path) -> list[tuple[Chunk, list[float]]]:
         """Index a single file, returning chunks with embeddings."""
         content = file_path.read_text(encoding="utf-8")
         rel_path = str(file_path.relative_to(self.vault_path))
@@ -646,5 +652,4 @@ class VaultIndexer:
         if not chunks:
             return []
         embeddings = self.embedder.embed_batch([c.content for c in chunks])
-        return list(zip(chunks, embeddings))
-
+        return list(zip(chunks, embeddings, strict=False))

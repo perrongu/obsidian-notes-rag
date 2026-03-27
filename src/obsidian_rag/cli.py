@@ -12,22 +12,31 @@ import click
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-from .config import Config, load_config, save_config, get_config_path, get_data_dir
-from .indexer import create_embedder, VaultIndexer, is_ollama_running, get_ollama_models, is_lmstudio_running, get_lmstudio_models
+from .config import Config, get_config_path, get_data_dir, load_config, save_config
+from .indexer import (
+    VaultIndexer,
+    create_embedder,
+    get_lmstudio_models,
+    get_ollama_models,
+    is_lmstudio_running,
+    is_ollama_running,
+)
 from .server import run_server
 from .store import VectorStore
 from .watcher import VaultWatcher
 
+
 @click.group()
 @click.option("--vault", default=None, help="Path to Obsidian vault")
 @click.option("--data", default=None, help="Path to vector store data")
-@click.option("--provider", default=None,
-              type=click.Choice(["openai", "ollama", "lmstudio"]),
-              help="Embedding provider (default: openai)")
-@click.option("--ollama-url", default=None,
-              help="Ollama API URL (only used with --provider ollama)")
-@click.option("--lmstudio-url", default=None,
-              help="LM Studio API URL (only used with --provider lmstudio)")
+@click.option(
+    "--provider",
+    default=None,
+    type=click.Choice(["openai", "ollama", "lmstudio"]),
+    help="Embedding provider (default: openai)",
+)
+@click.option("--ollama-url", default=None, help="Ollama API URL (only used with --provider ollama)")
+@click.option("--lmstudio-url", default=None, help="LM Studio API URL (only used with --provider lmstudio)")
 @click.option("--model", default=None, help="Override embedding model name")
 @click.pass_context
 def main(ctx, vault, data, provider, ollama_url, lmstudio_url, model):
@@ -78,7 +87,7 @@ def setup():
         # Check for existing API key
         existing_key = os.environ.get("OPENAI_API_KEY")
         if existing_key:
-            click.echo(f"\n✓ Found OPENAI_API_KEY in environment")
+            click.echo("\n✓ Found OPENAI_API_KEY in environment")
             if not click.confirm("Save API key to config file?", default=False):
                 config.openai_api_key = None
             else:
@@ -90,34 +99,31 @@ def setup():
     elif config.provider == "ollama":
         # Ollama setup - check connection first
         default_ollama_url = "http://localhost:11434"
-        ollama_url = click.prompt(
-            "\nOllama API URL",
-            default=default_ollama_url
-        )
+        ollama_url = click.prompt("\nOllama API URL", default=default_ollama_url)
         config.ollama_url = ollama_url
-        
+
         # Verify connection and get available models
         click.echo("Checking Ollama server...", nl=False)
         server_running = is_ollama_running(ollama_url)
-        
+
         if server_running:
             click.echo(" ✓ connected")
-            
+
             # Fetch available embedding models
             click.echo("Fetching available embedding models...", nl=False)
             available_models = get_ollama_models(ollama_url)
-            
+
             if available_models:
                 click.echo(f" found {len(available_models)}")
                 click.echo("\nSelect embedding model:")
                 for i, model in enumerate(available_models, 1):
                     click.echo(f"  {i}. {model}")
                 click.echo(f"  {len(available_models) + 1}. Other (enter model name)")
-                
+
                 choices = [str(i) for i in range(1, len(available_models) + 2)]
                 model_choice = click.prompt("Choice", type=click.Choice(choices), default="1")
                 choice_idx = int(model_choice) - 1
-                
+
                 if choice_idx < len(available_models):
                     config.ollama_model = available_models[choice_idx]
                 else:
@@ -134,34 +140,31 @@ def setup():
     else:
         # LM Studio setup - check connection after getting URL
         default_lmstudio_url = "http://localhost:1234"
-        lmstudio_url = click.prompt(
-            "\nLM Studio API URL",
-            default=default_lmstudio_url
-        )
+        lmstudio_url = click.prompt("\nLM Studio API URL", default=default_lmstudio_url)
         config.lmstudio_url = lmstudio_url
-        
+
         # Verify connection and get available models
         click.echo("Checking LM Studio server...", nl=False)
         server_running = is_lmstudio_running(lmstudio_url)
-        
+
         if server_running:
             click.echo(" ✓ connected")
-            
+
             # Fetch available embedding models
             click.echo("Fetching available embedding models...", nl=False)
             available_models = get_lmstudio_models(lmstudio_url)
-            
+
             if available_models:
                 click.echo(f" found {len(available_models)}")
                 click.echo("\nSelect embedding model:")
                 for i, model in enumerate(available_models, 1):
                     click.echo(f"  {i}. {model}")
                 click.echo(f"  {len(available_models) + 1}. Other (enter model identifier)")
-                
+
                 choices = [str(i) for i in range(1, len(available_models) + 2)]
                 model_choice = click.prompt("Choice", type=click.Choice(choices), default="1")
                 choice_idx = int(model_choice) - 1
-                
+
                 if choice_idx < len(available_models):
                     config.lmstudio_model = available_models[choice_idx]
                 else:
@@ -192,10 +195,7 @@ def setup():
 
     # 4. Data directory
     default_data = str(get_data_dir())
-    data_path = click.prompt(
-        "\nWhere to store the search index?",
-        default=default_data
-    )
+    data_path = click.prompt("\nWhere to store the search index?", default=default_data)
     data_path = os.path.expanduser(data_path)
     config.data_path = data_path
 
@@ -209,18 +209,14 @@ def setup():
         try:
             # Create embedder based on provider
             if config.provider == "openai":
-                embedder = create_embedder(provider="openai", model=config.openai_model, api_key=config.get_openai_api_key())
-            elif config.provider == "ollama":
                 embedder = create_embedder(
-                    provider="ollama",
-                    model=config.ollama_model,
-                    base_url=config.ollama_url
+                    provider="openai", model=config.openai_model, api_key=config.get_openai_api_key()
                 )
+            elif config.provider == "ollama":
+                embedder = create_embedder(provider="ollama", model=config.ollama_model, base_url=config.ollama_url)
             else:  # lmstudio
                 embedder = create_embedder(
-                    provider="lmstudio",
-                    model=config.lmstudio_model,
-                    base_url=config.lmstudio_url
+                    provider="lmstudio", model=config.lmstudio_model, base_url=config.lmstudio_url
                 )
 
             store = VectorStore(data_path=config.get_data_path())
@@ -279,7 +275,7 @@ def setup():
                     config.data_path or str(get_data_dir()),
                     config.provider,
                     config.ollama_url,
-                    None  # model
+                    None,  # model
                 )
                 plist_path.write_text(plist_content)
 
@@ -299,7 +295,7 @@ def setup():
         click.echo("  To auto-index on file changes, run: obsidian-notes-rag watch")
 
     click.echo("\nSetup complete! You can now:")
-    click.echo("  - Search: obsidian-notes-rag search \"your query\"")
+    click.echo('  - Search: obsidian-notes-rag search "your query"')
     click.echo("  - Add to Claude Code:")
     click.echo("      claude mcp add -s user obsidian-notes-rag -- uvx obsidian-notes-rag serve")
 
@@ -673,6 +669,7 @@ LOG_DIR = Path.home() / "Library" / "Logs" / "obsidian-notes-rag"
 def _get_wrapper_script_content() -> str:
     """Generate wrapper script that calls the watcher module."""
     import sys
+
     python_path = sys.executable
     return f"""#!/bin/bash
 # Wrapper script for obsidian-notes-rag watcher service

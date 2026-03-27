@@ -6,7 +6,6 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 try:
     import tomllib
@@ -15,24 +14,28 @@ except ImportError:
 
 import tomli_w
 from platformdirs import user_config_dir, user_data_dir
-from .indexer import IndexerConfig
 
+from .indexer import IndexerConfig
 
 APP_NAME = "obsidian-notes-rag"
 
 logger = logging.getLogger(__name__)
 
 
-def _get_keychain_value(service: str, account: str = APP_NAME) -> Optional[str]:
+def _get_keychain_value(service: str, account: str = APP_NAME) -> str | None:
     """Retrieve a secret from macOS Keychain. Returns None on failure."""
     import sys
+
     if sys.platform != "darwin":
         return None
     try:
         import subprocess
+
         result = subprocess.run(
             ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return result.stdout.strip() or None
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -54,6 +57,7 @@ def resolve_path_case(path: str) -> str:
     # On macOS, use the real path which preserves correct case
     if sys.platform == "darwin":
         import subprocess
+
         try:
             # Use realpath command which returns the canonical path with correct case
             result = subprocess.run(
@@ -90,11 +94,11 @@ class Config:
 
     # Core settings
     provider: str = "openai"
-    vault_path: Optional[str] = None
-    data_path: Optional[str] = None
+    vault_path: str | None = None
+    data_path: str | None = None
 
     # OpenAI settings
-    openai_api_key: Optional[str] = None
+    openai_api_key: str | None = None
 
     # Ollama settings
     ollama_url: str = "http://localhost:11434"
@@ -112,13 +116,9 @@ class Config:
         """Get the data path, using default if not set."""
         return self.data_path or str(get_data_dir())
 
-    def get_openai_api_key(self) -> Optional[str]:
+    def get_openai_api_key(self) -> str | None:
         """Get OpenAI API key from config, environment, or macOS Keychain."""
-        return (
-            self.openai_api_key
-            or os.environ.get("OPENAI_API_KEY")
-            or _get_keychain_value("OPENAI_API_KEY")
-        )
+        return self.openai_api_key or os.environ.get("OPENAI_API_KEY") or _get_keychain_value("OPENAI_API_KEY")
 
 
 def load_config() -> Config:

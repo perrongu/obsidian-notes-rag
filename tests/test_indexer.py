@@ -1,7 +1,5 @@
 """Tests for the indexer module."""
 
-import pytest
-
 from obsidian_rag.indexer import chunk_markdown, parse_frontmatter
 
 

@@ -1,7 +1,8 @@
 """Tests for CLI commands."""
 
+from unittest.mock import MagicMock, patch
+
 from click.testing import CliRunner
-from unittest.mock import patch, MagicMock
 
 from obsidian_rag.cli import main
 
@@ -10,9 +11,11 @@ class TestIndexCommand:
     def test_index_with_path_filter(self):
         """Verify --path-filter option is accepted and passed through."""
         runner = CliRunner()
-        with patch("obsidian_rag.cli.create_embedder") as mock_embedder, \
-             patch("obsidian_rag.cli.VectorStore") as mock_store, \
-             patch("obsidian_rag.cli.VaultIndexer") as mock_indexer:
+        with (
+            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.cli.VectorStore") as mock_store,
+            patch("obsidian_rag.cli.VaultIndexer") as mock_indexer,
+        ):
             mock_embedder.return_value = MagicMock()
             mock_embedder.return_value.close = MagicMock()
             mock_store.return_value = MagicMock()
@@ -27,8 +30,10 @@ class TestSimilarCommand:
     def test_similar_shows_results(self):
         """Verify similar command accepts note-path and displays results."""
         runner = CliRunner()
-        with patch("obsidian_rag.cli.create_embedder") as mock_embedder, \
-             patch("obsidian_rag.cli.VectorStore") as mock_store:
+        with (
+            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.cli.VectorStore") as mock_store,
+        ):
             embedder_instance = MagicMock()
             embedder_instance.embed.return_value = [0.1] * 1536
             embedder_instance.close = MagicMock()
@@ -39,7 +44,11 @@ class TestSimilarCommand:
                 {"content": "Note content", "metadata": {"file_path": "test.md", "heading": ""}}
             ]
             store_instance.search.return_value = [
-                {"content": "Similar note", "metadata": {"file_path": "other.md", "heading": "Section"}, "distance": 0.2}
+                {
+                    "content": "Similar note",
+                    "metadata": {"file_path": "other.md", "heading": "Section"},
+                    "distance": 0.2,
+                }
             ]
             mock_store.return_value = store_instance
 
@@ -52,8 +61,10 @@ class TestContextCommand:
     def test_context_shows_note_and_similar(self):
         """Verify context command shows note content and similar notes."""
         runner = CliRunner()
-        with patch("obsidian_rag.cli.create_embedder") as mock_embedder, \
-             patch("obsidian_rag.cli.VectorStore") as mock_store:
+        with (
+            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.cli.VectorStore") as mock_store,
+        ):
             embedder_instance = MagicMock()
             embedder_instance.embed.return_value = [0.1] * 1536
             embedder_instance.close = MagicMock()
@@ -64,7 +75,11 @@ class TestContextCommand:
                 {"content": "Note content here", "metadata": {"file_path": "test.md", "heading": ""}}
             ]
             store_instance.search.return_value = [
-                {"content": "Related note", "metadata": {"file_path": "related.md", "heading": "Intro"}, "distance": 0.3}
+                {
+                    "content": "Related note",
+                    "metadata": {"file_path": "related.md", "heading": "Intro"},
+                    "distance": 0.3,
+                }
             ]
             mock_store.return_value = store_instance
 

@@ -11,11 +11,10 @@ import subprocess
 import sys
 import threading
 import time
-
-import setproctitle
 from collections import deque
 from pathlib import Path
-from typing import Optional
+
+import setproctitle
 
 # Log rotation settings
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MB per log file
@@ -27,7 +26,7 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from .config import load_config
-from .indexer import create_embedder, Embedder, VaultIndexer, IndexerConfig
+from .indexer import Embedder, IndexerConfig, VaultIndexer, create_embedder
 from .store import VectorStore
 
 # Retry configuration
@@ -44,6 +43,7 @@ def _get_config():
     if _config is None:
         _config = load_config()
     return _config
+
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +64,7 @@ def send_notification(title: str, message: str):
             [
                 "osascript",
                 "-e",
-                'on run argv\n'
-                'display notification (item 2 of argv) with title (item 1 of argv)\n'
-                'end run',
+                "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run",
                 "--",
                 title,
                 message,
@@ -96,7 +94,7 @@ class RetryQueue:
             self._queue.append((path, 0))
             logger.info("Added to retry queue: %s", path)
 
-    def get_next(self) -> Optional[tuple[Path, int]]:
+    def get_next(self) -> tuple[Path, int] | None:
         """Get the next file to retry, if any."""
         with self._lock:
             if not self._queue:
@@ -111,10 +109,7 @@ class RetryQueue:
                 logger.info("Re-queued %s (attempt %d/%d)", path, attempts + 1, self.max_retries)
             else:
                 logger.error("Max retries exceeded for %s", path)
-                send_notification(
-                    "Obsidian RAG Error",
-                    f"Failed to index: {path.name}"
-                )
+                send_notification("Obsidian RAG Error", f"Failed to index: {path.name}")
 
     def is_empty(self) -> bool:
         """Check if the queue is empty."""
@@ -166,9 +161,9 @@ class NoteEventHandler(FileSystemEventHandler):
         embedder: Embedder,
         store: VectorStore,
         debounce_delay: float = 2.0,
-        exclude_patterns: Optional[list[str]] = None,
-        retry_queue: Optional[RetryQueue] = None,
-        indexer_config: Optional[IndexerConfig] = None,
+        exclude_patterns: list[str] | None = None,
+        retry_queue: RetryQueue | None = None,
+        indexer_config: IndexerConfig | None = None,
     ):
         super().__init__()
         self.vault_path = vault_path
@@ -227,6 +222,7 @@ class NoteEventHandler(FileSystemEventHandler):
             return True
         try:
             from openai import BadRequestError
+
             if isinstance(exc, BadRequestError):
                 return True
         except ImportError:
@@ -234,7 +230,12 @@ class NoteEventHandler(FileSystemEventHandler):
         # httpx 4xx (except 429) are permanent
         try:
             from httpx import HTTPStatusError
-            if isinstance(exc, HTTPStatusError) and 400 <= exc.response.status_code < 500 and exc.response.status_code != 429:
+
+            if (
+                isinstance(exc, HTTPStatusError)
+                and 400 <= exc.response.status_code < 500
+                and exc.response.status_code != 429
+            ):
                 return True
         except ImportError:
             pass
@@ -256,7 +257,7 @@ class NoteEventHandler(FileSystemEventHandler):
 
             results = self.indexer.index_file(path)
             if results:
-                chunks, embeddings = zip(*results)
+                chunks, embeddings = zip(*results, strict=False)
                 self.store.upsert_batch(list(chunks), list(embeddings))
                 logger.info("Indexed %d chunks from %s", len(chunks), rel_path)
         except Exception as e:
@@ -343,13 +344,13 @@ class VaultWatcher:
 
     def __init__(
         self,
-        vault_path: Optional[str] = None,
-        data_path: Optional[str] = None,
-        provider: Optional[str] = None,
-        ollama_url: Optional[str] = None,
-        lmstudio_url: Optional[str] = None,
-        model: Optional[str] = None,
-        debounce_delay: Optional[float] = None,
+        vault_path: str | None = None,
+        data_path: str | None = None,
+        provider: str | None = None,
+        ollama_url: str | None = None,
+        lmstudio_url: str | None = None,
+        model: str | None = None,
+        debounce_delay: float | None = None,
     ):
         config = _get_config()
 
@@ -358,7 +359,9 @@ class VaultWatcher:
         provider = provider or config.provider
         ollama_url = ollama_url or config.ollama_url
         lmstudio_url = lmstudio_url or config.lmstudio_url
-        debounce_delay = debounce_delay if debounce_delay is not None else float(os.environ.get("OBSIDIAN_RAG_DEBOUNCE", "2.0"))
+        debounce_delay = (
+            debounce_delay if debounce_delay is not None else float(os.environ.get("OBSIDIAN_RAG_DEBOUNCE", "2.0"))
+        )
 
         # Resolve model from config if not explicitly provided
         if model is None:
@@ -396,10 +399,10 @@ class VaultWatcher:
         self.debounce_delay = debounce_delay
         self.retry_queue = RetryQueue()
 
-        self._observer: Optional[BaseObserver] = None
-        self._handler: Optional[NoteEventHandler] = None
+        self._observer: BaseObserver | None = None
+        self._handler: NoteEventHandler | None = None
         self._running = False
-        self._health_thread: Optional[threading.Thread] = None
+        self._health_thread: threading.Thread | None = None
 
     def _wait_for_ollama(self, ollama_url: str, timeout: int = 300):
         """Wait for Ollama to become available."""
@@ -556,13 +559,13 @@ def _setup_logging():
 
 
 def run_watcher(
-    vault_path: Optional[str] = None,
-    data_path: Optional[str] = None,
-    provider: Optional[str] = None,
-    ollama_url: Optional[str] = None,
-    lmstudio_url: Optional[str] = None,
-    model: Optional[str] = None,
-    debounce: Optional[float] = None,
+    vault_path: str | None = None,
+    data_path: str | None = None,
+    provider: str | None = None,
+    ollama_url: str | None = None,
+    lmstudio_url: str | None = None,
+    model: str | None = None,
+    debounce: float | None = None,
 ):
     """Run the vault watcher (entry point for CLI)."""
     # Set process title for Activity Monitor visibility
