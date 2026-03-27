@@ -106,6 +106,25 @@ Chonkie RecursiveChunker: 1500 tokens max, 50 chars minimum, splits by heading >
 
 Reinstalling the package never touches databases or config.toml. A full reindex (`--clear`) is only needed if chunking logic changes.
 
+## Git Workflow
+
+Work on feature branches off `dev`. When done:
+
+```bash
+# 1. Merge PR into dev (via GitHub), close PR
+# 2. Locally:
+git checkout dev
+git pull
+git checkout custom/main
+git merge dev
+git push origin custom/main
+# 3. Reinstall (see Commands section)
+# 4. Cleanup:
+git branch -d <feature-branch>
+git push origin --delete <feature-branch>
+git checkout dev
+```
+
 ## Upstream Sync
 
 ```bash
