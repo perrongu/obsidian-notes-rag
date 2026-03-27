@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -31,21 +32,18 @@ from .store import VectorStore
 
 # Retry configuration
 MAX_RETRIES = 3
-RETRY_DELAY = 30  # seconds
 HEALTH_CHECK_INTERVAL = 60  # seconds
 
-# Load config for defaults
-_config = load_config()
+# Lazy-loaded config — avoids module-level side effects (subprocess calls, file I/O)
+_config = None
 
-DEFAULT_VAULT_PATH = _config.vault_path or os.environ.get(
-    "OBSIDIAN_RAG_VAULT", ""
-)
-DEFAULT_DATA_PATH = _config.get_data_path()
-DEFAULT_PROVIDER = _config.provider
-DEFAULT_OLLAMA_URL = _config.ollama_url
-DEFAULT_LMSTUDIO_URL = _config.lmstudio_url
-DEFAULT_MODEL: Optional[str] = None  # Use provider default
-DEFAULT_DEBOUNCE = float(os.environ.get("OBSIDIAN_RAG_DEBOUNCE", "2.0"))
+
+def _get_config():
+    """Get or create the module-level config (lazy)."""
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +58,18 @@ def check_ollama_health(ollama_url: str = "http://localhost:11434") -> bool:
 
 
 def send_notification(title: str, message: str):
-    """Send a macOS notification."""
+    """Send a macOS notification (uses argv passing to avoid AppleScript injection)."""
     try:
         subprocess.run(
             [
                 "osascript",
                 "-e",
-                f'display notification "{message}" with title "{title}"',
+                'on run argv\n'
+                'display notification (item 2 of argv) with title (item 1 of argv)\n'
+                'end run',
+                "--",
+                title,
+                message,
             ],
             check=False,
             capture_output=True,
@@ -91,7 +94,7 @@ class RetryQueue:
                 if queued_path == path:
                     return
             self._queue.append((path, 0))
-            logger.info(f"Added to retry queue: {path}")
+            logger.info("Added to retry queue: %s", path)
 
     def get_next(self) -> Optional[tuple[Path, int]]:
         """Get the next file to retry, if any."""
@@ -105,9 +108,9 @@ class RetryQueue:
         with self._lock:
             if attempts < self.max_retries:
                 self._queue.append((path, attempts + 1))
-                logger.info(f"Re-queued {path} (attempt {attempts + 1}/{self.max_retries})")
+                logger.info("Re-queued %s (attempt %d/%d)", path, attempts + 1, self.max_retries)
             else:
-                logger.error(f"Max retries exceeded for {path}")
+                logger.error("Max retries exceeded for %s", path)
                 send_notification(
                     "Obsidian RAG Error",
                     f"Failed to index: {path.name}"
@@ -144,7 +147,7 @@ class DebouncedHandler:
         try:
             callback(*args)
         except Exception as e:
-            logger.error(f"Error in debounced callback for {key}: {e}")
+            logger.error("Error in debounced callback for %s: %s", key, e)
 
     def cancel_all(self):
         """Cancel all pending timers."""
@@ -216,32 +219,51 @@ class NoteEventHandler(FileSystemEventHandler):
         """Get the path relative to the vault root."""
         return str(path.relative_to(self.vault_path))
 
+    @staticmethod
+    def _is_permanent_error(exc: Exception) -> bool:
+        """Return True if the error should not be retried."""
+        # Dimension mismatch (e.g. model changed but DB has old dimensions)
+        if isinstance(exc, sqlite3.OperationalError) and "dimension mismatch" in str(exc).lower():
+            return True
+        try:
+            from openai import BadRequestError
+            if isinstance(exc, BadRequestError):
+                return True
+        except ImportError:
+            pass
+        # httpx 4xx (except 429) are permanent
+        try:
+            from httpx import HTTPStatusError
+            if isinstance(exc, HTTPStatusError) and 400 <= exc.response.status_code < 500 and exc.response.status_code != 429:
+                return True
+        except ImportError:
+            pass
+        return False
+
     def _index_file(self, path: Path):
         """Index or re-index a single file."""
         if self._should_ignore(path):
             return
 
-        # Check file exists before attempting to index (avoids retry loops for deleted files)
         if not path.exists():
             return
 
         rel_path = self._get_relative_path(path)
-        logger.info(f"Indexing: {rel_path}")
+        logger.info("Indexing: %s", rel_path)
 
         try:
-            # Delete existing chunks for this file
             self.store.delete_by_file(rel_path)
 
-            # Index the file
             results = self.indexer.index_file(path)
             if results:
                 chunks, embeddings = zip(*results)
                 self.store.upsert_batch(list(chunks), list(embeddings))
-                logger.info(f"Indexed {len(chunks)} chunks from {rel_path}")
+                logger.info("Indexed %d chunks from %s", len(chunks), rel_path)
         except Exception as e:
-            logger.error(f"Error indexing {rel_path}: {e}")
-            # Add to retry queue if available
-            if self.retry_queue:
+            logger.error("Error indexing %s: %s", rel_path, e)
+            if self._is_permanent_error(e):
+                logger.warning("Permanent error for %s, skipping retry", rel_path)
+            elif self.retry_queue:
                 self.retry_queue.add(path)
 
     def _delete_file(self, path: Path):
@@ -254,11 +276,11 @@ class NoteEventHandler(FileSystemEventHandler):
         except ValueError:
             return
 
-        logger.info(f"Removing from index: {rel_path}")
+        logger.info("Removing from index: %s", rel_path)
         try:
             self.store.delete_by_file(rel_path)
         except Exception as e:
-            logger.error(f"Error removing {rel_path}: {e}")
+            logger.error("Error removing %s: %s", rel_path, e)
 
     def on_created(self, event: FileSystemEvent):
         """Handle file creation."""
@@ -321,21 +343,40 @@ class VaultWatcher:
 
     def __init__(
         self,
-        vault_path: str = DEFAULT_VAULT_PATH,
-        data_path: str = DEFAULT_DATA_PATH,
-        provider: str = DEFAULT_PROVIDER,
-        ollama_url: str = DEFAULT_OLLAMA_URL,
-        lmstudio_url: str = DEFAULT_LMSTUDIO_URL,
-        model: Optional[str] = DEFAULT_MODEL,
-        debounce_delay: float = DEFAULT_DEBOUNCE,
+        vault_path: Optional[str] = None,
+        data_path: Optional[str] = None,
+        provider: Optional[str] = None,
+        ollama_url: Optional[str] = None,
+        lmstudio_url: Optional[str] = None,
+        model: Optional[str] = None,
+        debounce_delay: Optional[float] = None,
     ):
+        config = _get_config()
+
+        vault_path = vault_path or config.vault_path or os.environ.get("OBSIDIAN_RAG_VAULT", "")
+        data_path = data_path or config.get_data_path()
+        provider = provider or config.provider
+        ollama_url = ollama_url or config.ollama_url
+        lmstudio_url = lmstudio_url or config.lmstudio_url
+        debounce_delay = debounce_delay if debounce_delay is not None else float(os.environ.get("OBSIDIAN_RAG_DEBOUNCE", "2.0"))
+
+        # Resolve model from config if not explicitly provided
+        if model is None:
+            if provider == "openai":
+                model = config.openai_model
+            elif provider == "ollama":
+                model = config.ollama_model
+            elif provider == "lmstudio":
+                model = config.lmstudio_model
+
         self.vault_path = Path(vault_path)
         self.provider = provider
         self.ollama_url = ollama_url
 
-        # Set OpenAI API key from config if needed
-        if provider == "openai" and _config.openai_api_key:
-            os.environ["OPENAI_API_KEY"] = _config.openai_api_key
+        # Resolve API key from config, env, or Keychain — passed directly, never via os.environ
+        resolved_api_key = None
+        if provider == "openai":
+            resolved_api_key = config.get_openai_api_key()
 
         # Determine correct base_url based on provider
         if provider == "ollama":
@@ -350,7 +391,7 @@ class VaultWatcher:
         else:
             base_url = None
 
-        self.embedder = create_embedder(provider=provider, model=model, base_url=base_url)
+        self.embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=resolved_api_key)
         self.store = VectorStore(data_path=data_path)
         self.debounce_delay = debounce_delay
         self.retry_queue = RetryQueue()
@@ -395,7 +436,7 @@ class VaultWatcher:
                     if self._handler:
                         self._handler._index_file(path)
                 except Exception as e:
-                    logger.error(f"Retry failed for {path}: {e}")
+                    logger.error("Retry failed for %s: %s", path, e)
                     self.retry_queue.requeue(path, attempts)
 
     def start(self):
@@ -403,9 +444,9 @@ class VaultWatcher:
         if self._running:
             return
 
-        logger.info(f"Starting watcher for vault: {self.vault_path}")
-        logger.info(f"Debounce delay: {self.debounce_delay}s")
-        logger.info(f"Provider: {self.provider}")
+        logger.info("Starting watcher for vault: %s", self.vault_path)
+        logger.info("Debounce delay: %ss", self.debounce_delay)
+        logger.info("Provider: %s", self.provider)
 
         self._handler = NoteEventHandler(
             vault_path=self.vault_path,
@@ -413,7 +454,7 @@ class VaultWatcher:
             store=self.store,
             debounce_delay=self.debounce_delay,
             retry_queue=self.retry_queue,
-            indexer_config=_config.indexer,
+            indexer_config=_get_config().indexer,
         )
 
         observer = Observer()
@@ -453,7 +494,7 @@ class VaultWatcher:
 
         # Set up signal handlers
         def signal_handler(signum, frame):
-            logger.info(f"Received signal {signum}")
+            logger.info("Received signal %s", signum)
             self.stop()
             sys.exit(0)
 
@@ -471,13 +512,18 @@ class VaultWatcher:
 
 def _setup_logging():
     """Configure logging with rotation when running as a service."""
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        return  # Already configured — avoid duplicate handlers
+
     log_format = "%(asctime)s - %(levelname)s - %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
 
     # Check if we're running as a service (stderr redirected to file)
     log_dir = Path.home() / "Library" / "Logs" / "obsidian-notes-rag"
 
-    if not sys.stderr.isatty() and log_dir.exists():
+    if not sys.stderr.isatty():
+        log_dir.mkdir(parents=True, exist_ok=True)
         # Running as service - use rotating file handler
         log_file = log_dir / "watcher.log"
         handler = logging.handlers.RotatingFileHandler(
@@ -487,12 +533,19 @@ def _setup_logging():
         )
         handler.setFormatter(logging.Formatter(log_format, date_format))
 
-        root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
         root_logger.addHandler(handler)
 
-        # Note: We intentionally don't add a StreamHandler when running as a service.
-        # launchd captures stderr to watcher.err without rotation, which can grow unbounded.
+        # Redirect stderr to rotating log to prevent unbounded watcher.err growth
+        stderr_log = log_dir / "watcher.err.log"
+        stderr_handler = logging.handlers.RotatingFileHandler(
+            stderr_log,
+            maxBytes=MAX_LOG_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+        )
+        stderr_handler.setFormatter(logging.Formatter(log_format, date_format))
+        stderr_handler.setLevel(logging.WARNING)
+        root_logger.addHandler(stderr_handler)
     else:
         # Interactive mode - simple console logging
         logging.basicConfig(
@@ -503,13 +556,13 @@ def _setup_logging():
 
 
 def run_watcher(
-    vault_path: str = DEFAULT_VAULT_PATH,
-    data_path: str = DEFAULT_DATA_PATH,
-    provider: str = DEFAULT_PROVIDER,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
-    lmstudio_url: str = DEFAULT_LMSTUDIO_URL,
-    model: Optional[str] = DEFAULT_MODEL,
-    debounce: float = DEFAULT_DEBOUNCE,
+    vault_path: Optional[str] = None,
+    data_path: Optional[str] = None,
+    provider: Optional[str] = None,
+    ollama_url: Optional[str] = None,
+    lmstudio_url: Optional[str] = None,
+    model: Optional[str] = None,
+    debounce: Optional[float] = None,
 ):
     """Run the vault watcher (entry point for CLI)."""
     # Set process title for Activity Monitor visibility
@@ -525,7 +578,7 @@ def run_watcher(
         ollama_url=ollama_url,
         lmstudio_url=lmstudio_url,
         model=model,
-        debounce_delay=debounce,
+        debounce_delay=debounce or float(os.environ.get("OBSIDIAN_RAG_DEBOUNCE", "2.0")),
     )
     watcher.run_forever()
 

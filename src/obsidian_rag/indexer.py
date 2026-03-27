@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import uuid
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -45,23 +44,29 @@ class IndexerConfig:
         if self.preset != "default":
             self._apply_preset_defaults()
 
+    @classmethod
+    def _make_defaults(cls, preset: str = "default") -> "IndexerConfig":
+        """Create a baseline instance with raw defaults (bypassing __post_init__)."""
+        obj = object.__new__(cls)
+        obj.preset = preset
+        obj.chunk_size = 1500
+        obj.chunk_overlap = 0  # reserved for future OverlapRefinery support
+        obj.min_characters_per_chunk = 50
+        obj.heading_split_depth = 4
+        obj.preserve_latex_blocks = False
+        obj.preserve_code_blocks = True
+        obj.similarity_threshold = 0.10
+        obj.default_search_limit = 10
+        obj.default_similar_limit = 5
+        obj.default_context_limit = 5
+        obj.extra_exclude_patterns = []
+        return obj
+
     def _apply_preset_defaults(self):
         presets = _PRESETS.get(self.preset)
         if presets is None:
             return
-        defaults = object.__new__(IndexerConfig)
-        defaults.preset = "default"
-        defaults.chunk_size = 1500
-        defaults.chunk_overlap = 0
-        defaults.min_characters_per_chunk = 50
-        defaults.heading_split_depth = 4
-        defaults.preserve_latex_blocks = False
-        defaults.preserve_code_blocks = True
-        defaults.similarity_threshold = 0.10
-        defaults.default_search_limit = 10
-        defaults.default_similar_limit = 5
-        defaults.default_context_limit = 5
-        defaults.extra_exclude_patterns = []
+        defaults = self._make_defaults()
 
         for k, v in presets.items():
             if getattr(self, k) == getattr(defaults, k):
@@ -69,19 +74,7 @@ class IndexerConfig:
 
     def to_dict(self) -> Dict:
         """Serialize for TOML. Only includes fields that differ from preset defaults."""
-        base = IndexerConfig.__new__(IndexerConfig)
-        base.preset = self.preset
-        base.chunk_size = 1500
-        base.chunk_overlap = 0
-        base.min_characters_per_chunk = 50
-        base.heading_split_depth = 4
-        base.preserve_latex_blocks = False
-        base.preserve_code_blocks = True
-        base.similarity_threshold = 0.10
-        base.default_search_limit = 10
-        base.default_similar_limit = 5
-        base.default_context_limit = 5
-        base.extra_exclude_patterns = []
+        base = self._make_defaults(self.preset)
         if self.preset in _PRESETS:
             for k, v in _PRESETS[self.preset].items():
                 setattr(base, k, v)
@@ -326,21 +319,87 @@ def _generate_chunk_id(
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
+_OPENAI_MAX_TOKENS = 8191
+
+
+def _truncate_for_embedding(
+    text: str,
+    max_tokens: int = _OPENAI_MAX_TOKENS,
+    model: str = "text-embedding-3-small",
+) -> str:
+    """Truncate text to fit within the model's token limit.
+
+    Uses tiktoken if available (with model-specific encoding); falls back to
+    a conservative 4 chars/token estimate.
+    """
+    try:
+        import tiktoken
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except KeyError:
+            enc = tiktoken.get_encoding("cl100k_base")
+        tokens = enc.encode(text)
+        if len(tokens) <= max_tokens:
+            return text
+        return enc.decode(tokens[:max_tokens])
+    except ImportError:
+        char_limit = max_tokens * 4
+        if len(text) <= char_limit:
+            return text
+        return text[:char_limit]
+
+
 class OpenAIEmbedder:
     """Generate embeddings using OpenAI API."""
 
-    def __init__(self, model: str = "text-embedding-3-small"):
+    _MAX_RETRIES = 3
+    _RETRY_DELAYS = (1.0, 4.0, 16.0)
+
+    def __init__(self, model: str = "text-embedding-3-small", api_key: Optional[str] = None):
         from openai import OpenAI
-        self.client = OpenAI()
+        self.client = OpenAI(api_key=api_key) if api_key else OpenAI()
         self.model = model
 
+    def _call_with_retry(self, texts: List[str]) -> list:
+        """Call the embeddings API with exponential backoff on transient errors."""
+        import time
+        from openai import RateLimitError, APITimeoutError, APIConnectionError, APIStatusError
+
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                return self.client.embeddings.create(input=texts, model=self.model)
+            except (RateLimitError, APITimeoutError, APIConnectionError) as e:
+                if attempt == self._MAX_RETRIES - 1:
+                    raise
+                time.sleep(self._RETRY_DELAYS[attempt])
+            except APIStatusError as e:
+                if e.status_code < 500 or attempt == self._MAX_RETRIES - 1:
+                    raise
+                time.sleep(self._RETRY_DELAYS[attempt])
+        raise RuntimeError("unreachable")
+
     def embed(self, text: str, task_type: str = "search_document") -> List[float]:
-        response = self.client.embeddings.create(input=text, model=self.model)
+        safe_text = _truncate_for_embedding(text, model=self.model)
+        response = self._call_with_retry([safe_text])
         return response.data[0].embedding
 
+    # OpenAI allows max 300k tokens per request; use conservative sub-batches
+    _MAX_TEXTS_PER_BATCH = 100
+
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        response = self.client.embeddings.create(input=texts, model=self.model)
-        return [item.embedding for item in response.data]
+        safe_texts = [_truncate_for_embedding(t, model=self.model) for t in texts]
+        if len(safe_texts) <= self._MAX_TEXTS_PER_BATCH:
+            response = self._call_with_retry(safe_texts)
+            return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
+        # Sub-batch to stay under API token limits
+        all_embeddings: List[List[float]] = []
+        for i in range(0, len(safe_texts), self._MAX_TEXTS_PER_BATCH):
+            batch = safe_texts[i : i + self._MAX_TEXTS_PER_BATCH]
+            response = self._call_with_retry(batch)
+            all_embeddings.extend(
+                item.embedding for item in sorted(response.data, key=lambda x: x.index)
+            )
+        return all_embeddings
 
     def close(self):
         pass
@@ -500,12 +559,15 @@ def create_embedder(
     provider: str = "openai",
     model: Optional[str] = None,
     base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Embedder:
     """Create an embedder instance for the specified provider."""
     if provider == "openai":
-        kwargs = {}
+        kwargs: dict = {}
         if model:
             kwargs["model"] = model
+        if api_key:
+            kwargs["api_key"] = api_key
         return OpenAIEmbedder(**kwargs)
     elif provider == "ollama":
         kwargs = {}
@@ -581,17 +643,8 @@ class VaultIndexer:
         content = file_path.read_text(encoding="utf-8")
         rel_path = str(file_path.relative_to(self.vault_path))
         chunks = chunk_markdown(content, rel_path, config=self.config)
-        results = []
-        for chunk in chunks:
-            embedding = self.embedder.embed(chunk.content)
-            results.append((chunk, embedding))
-        return results
+        if not chunks:
+            return []
+        embeddings = self.embedder.embed_batch([c.content for c in chunks])
+        return list(zip(chunks, embeddings))
 
-    def index_all(self) -> Iterator[Tuple[Chunk, List[float]]]:
-        """Index all files in the vault."""
-        for file_path in self.iter_markdown_files():
-            try:
-                for chunk, embedding in self.index_file(file_path):
-                    yield chunk, embedding
-            except Exception as e:
-                print(f"Error indexing {file_path}: {e}")

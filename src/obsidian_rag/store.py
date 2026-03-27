@@ -12,11 +12,6 @@ import sqlite_vec
 
 from .indexer import Chunk
 
-# Default embedding dimension (nomic-embed-text = 768, OpenAI small = 1536)
-# Detected automatically on first upsert.
-DEFAULT_DIM = 768
-
-
 def _serialize_f32(vec: Sequence[float]) -> bytes:
     """Serialize a list of floats to a compact bytes format for sqlite-vec."""
     return struct.pack(f"{len(vec)}f", *vec)
@@ -84,26 +79,6 @@ class VectorStore:
         """)
         self.db.commit()
 
-    def upsert(self, chunk: Chunk, embedding: List[float]) -> None:
-        """Add or update a chunk."""
-        with self._lock:
-            self._ensure_vec_table(len(embedding))
-            meta = self._prepare_metadata(chunk)
-
-            self.db.execute("""
-                INSERT OR REPLACE INTO chunks (id, file_path, heading, heading_level, type, tags, content)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (chunk.id, meta["file_path"], meta["heading"], meta["heading_level"],
-                  meta["type"], meta.get("tags", ""), chunk.content))
-
-            # sqlite-vec: delete then insert (no native upsert on virtual tables)
-            self.db.execute("DELETE FROM chunks_vec WHERE id = ?", (chunk.id,))
-            self.db.execute(
-                "INSERT INTO chunks_vec (id, embedding) VALUES (?, ?)",
-                (chunk.id, _serialize_f32(embedding))
-            )
-            self.db.commit()
-
     def upsert_batch(self, chunks: List[Chunk], embeddings: Sequence[Sequence[float]]) -> None:
         """Add or update multiple chunks."""
         if not chunks:
@@ -138,6 +113,8 @@ class VectorStore:
                 self.db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders})", ids)
                 self.db.commit()
 
+    _ALLOWED_FILTER_COLUMNS = frozenset({"type", "file_path", "heading", "tags"})
+
     def search(
         self,
         query_embedding: List[float],
@@ -155,11 +132,18 @@ class VectorStore:
                 conditions = []
                 params: list = []
                 for key, value in where.items():
+                    if key not in self._ALLOWED_FILTER_COLUMNS:
+                        raise ValueError(f"Invalid filter column: {key}")
                     conditions.append(f"c.{key} = ?")
                     params.append(value)
 
                 where_clause = " AND ".join(conditions)
-                fetch_limit = limit * 5
+                # Over-fetch from the vector index so that after the metadata
+                # filter is applied we still have enough results.  A factor of
+                # 5 covers filters that match ~20 %+ of the corpus; very
+                # selective filters may return fewer than `limit` results.
+                _FILTER_OVERFETCH_FACTOR = 5
+                fetch_limit = limit * _FILTER_OVERFETCH_FACTOR
 
                 rows = self.db.execute(f"""
                     SELECT c.id, c.file_path, c.heading, c.heading_level, c.type, c.tags, c.content, v.distance

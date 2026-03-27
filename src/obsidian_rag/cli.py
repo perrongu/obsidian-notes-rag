@@ -2,7 +2,6 @@
 
 import logging
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,14 +17,6 @@ from .indexer import create_embedder, VaultIndexer, is_ollama_running, get_ollam
 from .server import run_server
 from .store import VectorStore
 from .watcher import VaultWatcher
-
-# Default configuration
-DEFAULT_VAULT = "/Users/ernestkoe/Documents/Brave Robot"
-DEFAULT_DATA = "/Users/ernestkoe/Projects/obsidian-notes-rag/data"
-DEFAULT_PROVIDER = "openai"
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_LMSTUDIO_URL = "http://localhost:1234"
-
 
 @click.group()
 @click.option("--vault", default=None, help="Path to Obsidian vault")
@@ -46,7 +37,7 @@ def main(ctx, vault, data, provider, ollama_url, lmstudio_url, model):
     # Load config from file, then apply CLI overrides
     config = load_config()
 
-    ctx.obj["vault"] = vault or config.vault_path or DEFAULT_VAULT
+    ctx.obj["vault"] = vault or config.vault_path or ""
     ctx.obj["data"] = data or config.get_data_path()
     ctx.obj["provider"] = provider or config.provider
     ctx.obj["ollama_url"] = ollama_url or config.ollama_url
@@ -218,10 +209,7 @@ def setup():
         try:
             # Create embedder based on provider
             if config.provider == "openai":
-                # Set API key in environment for OpenAI client
-                if config.openai_api_key:
-                    os.environ["OPENAI_API_KEY"] = config.openai_api_key
-                embedder = create_embedder(provider="openai", model=config.openai_model)
+                embedder = create_embedder(provider="openai", model=config.openai_model, api_key=config.get_openai_api_key())
             elif config.provider == "ollama":
                 embedder = create_embedder(
                     provider="ollama",
@@ -323,6 +311,9 @@ def setup():
 def index(ctx, clear, path_filter):
     """Index all markdown files in the vault."""
     vault_path = ctx.obj["vault"]
+    if not vault_path:
+        click.echo("Error: No vault path configured. Run 'obsidian-rag setup' first.", err=True)
+        sys.exit(1)
     data_path = ctx.obj["data"]
     provider = ctx.obj["provider"]
     ollama_url = ctx.obj["ollama_url"]
@@ -352,8 +343,11 @@ def index(ctx, clear, path_filter):
     else:
         base_url = None
 
+    # Resolve API key for OpenAI (config → env → Keychain)
+    api_key = config.get_openai_api_key() if provider == "openai" else None
+
     # Initialize components
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url)
+    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
     store = VectorStore(data_path=data_path)
     indexer = VaultIndexer(vault_path=vault_path, embedder=embedder, config=config.indexer)
 
@@ -434,7 +428,8 @@ def search(ctx, query, limit, note_type):
         base_url = None
 
     # Initialize components
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url)
+    api_key = config.get_openai_api_key() if provider == "openai" else None
+    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
     store = VectorStore(data_path=data_path)
 
     # Generate query embedding
@@ -504,7 +499,8 @@ def similar(ctx, note_path, limit):
     else:
         base_url = None
 
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url)
+    api_key = config.get_openai_api_key() if provider == "openai" else None
+    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
     store = VectorStore(data_path=data_path)
 
     click.echo(f"Finding notes similar to: {note_path}\n")
@@ -570,7 +566,8 @@ def context(ctx, note_path, limit):
     else:
         base_url = None
 
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url)
+    api_key = config.get_openai_api_key() if provider == "openai" else None
+    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
     store = VectorStore(data_path=data_path)
 
     click.echo(f"Getting context for: {note_path}\n")
@@ -630,6 +627,9 @@ def stats(ctx):
 def watch(ctx, debounce):
     """Watch vault for changes and auto-reindex."""
     vault_path = ctx.obj["vault"]
+    if not vault_path:
+        click.echo("Error: No vault path configured. Run 'obsidian-rag setup' first.", err=True)
+        sys.exit(1)
     data_path = ctx.obj["data"]
     provider = ctx.obj["provider"]
     ollama_url = ctx.obj["ollama_url"]
@@ -699,57 +699,34 @@ def _uninstall_wrapper_script():
 
 
 def _get_plist_content(vault_path: str, data_path: str, provider: str, ollama_url: str, model: str | None) -> str:
-    """Generate launchd plist content."""
-    # Use wrapper script for better System Settings appearance
+    """Generate launchd plist content using plistlib (safe XML escaping)."""
+    import plistlib
+
     wrapper_path = WRAPPER_SCRIPT_DIR / WRAPPER_SCRIPT_NAME
 
-    # Build environment variables section
-    env_vars = f"""        <key>OBSIDIAN_RAG_VAULT</key>
-        <string>{vault_path}</string>
-        <key>OBSIDIAN_RAG_DATA</key>
-        <string>{data_path}</string>
-        <key>OBSIDIAN_RAG_PROVIDER</key>
-        <string>{provider}</string>"""
-
+    env_vars: dict[str, str] = {
+        "OBSIDIAN_RAG_VAULT": vault_path,
+        "OBSIDIAN_RAG_DATA": data_path,
+        "OBSIDIAN_RAG_PROVIDER": provider,
+    }
     if provider == "ollama":
-        env_vars += f"""
-        <key>OBSIDIAN_RAG_OLLAMA_URL</key>
-        <string>{ollama_url}</string>"""
-
+        env_vars["OBSIDIAN_RAG_OLLAMA_URL"] = ollama_url
     if model:
-        env_vars += f"""
-        <key>OBSIDIAN_RAG_MODEL</key>
-        <string>{model}</string>"""
+        env_vars["OBSIDIAN_RAG_MODEL"] = model
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.obsidian-notes-rag.watcher</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{wrapper_path}</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-{env_vars}
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
-    <key>StandardOutPath</key>
-    <string>{LOG_DIR}/watcher.log</string>
-    <key>StandardErrorPath</key>
-    <string>{LOG_DIR}/watcher.err</string>
-    <key>WorkingDirectory</key>
-    <string>{Path.cwd()}</string>
-</dict>
-</plist>
-"""
+    plist_dict: dict = {
+        "Label": "com.obsidian-notes-rag.watcher",
+        "ProgramArguments": [str(wrapper_path)],
+        "EnvironmentVariables": env_vars,
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 30,
+        "StandardOutPath": str(LOG_DIR / "watcher.log"),
+        "StandardErrorPath": str(LOG_DIR / "watcher.err"),
+        "WorkingDirectory": str(Path.home()),
+    }
+
+    return plistlib.dumps(plist_dict, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
 
 
 @main.command("install-service")

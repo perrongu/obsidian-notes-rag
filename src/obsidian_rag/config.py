@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,24 @@ from .indexer import IndexerConfig
 
 
 APP_NAME = "obsidian-notes-rag"
+
+logger = logging.getLogger(__name__)
+
+
+def _get_keychain_value(service: str, account: str = APP_NAME) -> Optional[str]:
+    """Retrieve a secret from macOS Keychain. Returns None on failure."""
+    import sys
+    if sys.platform != "darwin":
+        return None
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip() or None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
 
 
 def resolve_path_case(path: str) -> str:
@@ -94,8 +113,12 @@ class Config:
         return self.data_path or str(get_data_dir())
 
     def get_openai_api_key(self) -> Optional[str]:
-        """Get OpenAI API key from config or environment."""
-        return self.openai_api_key or os.environ.get("OPENAI_API_KEY")
+        """Get OpenAI API key from config, environment, or macOS Keychain."""
+        return (
+            self.openai_api_key
+            or os.environ.get("OPENAI_API_KEY")
+            or _get_keychain_value("OPENAI_API_KEY")
+        )
 
 
 def load_config() -> Config:
@@ -140,8 +163,8 @@ def load_config() -> Config:
             if "indexer" in data:
                 config.indexer = IndexerConfig.from_dict(data["indexer"])
 
-        except Exception:
-            pass  # Use defaults if config file is invalid
+        except Exception as e:
+            logger.warning("Failed to parse config file %s: %s", config_path, e)
 
     # Environment variable overrides
     if os.environ.get("OBSIDIAN_RAG_PROVIDER"):
