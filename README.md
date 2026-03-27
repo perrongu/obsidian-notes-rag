@@ -197,6 +197,97 @@ The old ChromaDB data at `~/.local/share/obsidian-notes-rag/` (or your configure
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
 
+## Fork Maintenance (perrongu/obsidian-notes-rag)
+
+This is a fork of [proofgeist/obsidian-notes-rag](https://github.com/proofgeist/obsidian-notes-rag) with custom modifications on the `custom/main` branch.
+
+### Custom modifications (vs upstream v1.1.2)
+
+- **Keychain macOS** — API key resolution: config → env → Keychain (`config.py`)
+- **Truncation tiktoken** — respect 8191 token limit for embeddings (`indexer.py`)
+- **Retry with backoff** — exponential backoff on OpenAI API calls (`indexer.py`)
+- **Batch embedding** — sub-batches of 100 texts max per request (`indexer.py`)
+- **Structured logging** — in MCP server and watcher (`server.py`, `watcher.py`)
+- **Safe AppleScript** — argv passing instead of f-string interpolation (`watcher.py`)
+- **Permanent error detection** — avoid retry loops on non-transient errors (`watcher.py`)
+- **plistlib** — safe plist generation (`cli.py`)
+- **Filter validation** — allowed columns in store queries (`store.py`)
+- **Lazy config** — deferred loading in watcher (`watcher.py`)
+
+### Key paths
+
+| Element | Path |
+|---------|------|
+| Repo | `~/obsidian-notes-rag/` |
+| Binary | `~/.local/bin/obsidian-rag` |
+| Installed package | `~/.local/share/uv/tools/obsidian-notes-rag/` |
+| Config | `~/Library/Application Support/obsidian-notes-rag/config.toml` |
+| Databases | `~/Library/Application Support/obsidian-notes-rag/*.db` |
+| Logs | `~/Library/Logs/obsidian-notes-rag/` |
+| Watcher plist | `~/Library/LaunchAgents/com.obsidian-notes-rag.watcher.plist` |
+| MCP (Claude Code) | `~/.claude.json` |
+| MCP (Claude Desktop) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+
+### Sync upstream updates
+
+```bash
+cd ~/obsidian-notes-rag
+git fetch upstream
+git log --oneline custom/main..upstream/main   # see what's new
+git checkout custom/main
+git merge upstream/main                         # resolve conflicts if any
+git push origin custom/main
+```
+
+### Reinstall after update
+
+```bash
+# 1. Stop watcher
+launchctl unload ~/Library/LaunchAgents/com.obsidian-notes-rag.watcher.plist
+
+# 2. Reinstall from fork (IMPORTANT: --python to force homebrew)
+uv tool install --force --python /opt/homebrew/bin/python3.13 \
+  "obsidian-notes-rag @ git+https://github.com/perrongu/obsidian-notes-rag.git@custom/main"
+
+# 3. Restart watcher
+launchctl load ~/Library/LaunchAgents/com.obsidian-notes-rag.watcher.plist
+```
+
+### Verification checklist
+
+```bash
+which obsidian-rag                         # → ~/.local/bin/obsidian-rag
+obsidian-rag stats                         # → shows document count
+obsidian-rag search "test" --limit 1       # → returns results
+launchctl list | grep obsidian-notes       # → PID visible
+head -1 ~/.local/share/uv/tools/obsidian-notes-rag/pyvenv.cfg
+# → home = /opt/homebrew/...  (NOT /Library/Frameworks)
+```
+
+### Rollback to PyPI (if fork breaks)
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.obsidian-notes-rag.watcher.plist
+uv tool install --force --python /opt/homebrew/bin/python3.13 obsidian-notes-rag==1.1.2
+launchctl load ~/Library/LaunchAgents/com.obsidian-notes-rag.watcher.plist
+```
+
+> **Note:** rollback to PyPI loses all custom modifications (no retry, no truncation, etc.)
+
+### Why `--python /opt/homebrew/bin/python3.13`
+
+The Python from `/Library/Frameworks/` (python.org installer) does not compile sqlite3 with
+`enable_load_extension`, which prevents sqlite-vec from working. Homebrew Python includes
+this capability. Always specify this flag when installing.
+
+### Data safety
+
+- Reinstalling the package **never** touches SQLite databases or `config.toml`
+- A full reindex (`obsidian-rag index --clear`) is only needed if chunking logic changes
+- Without `--clear`, indexing is additive (upsert)
+
+---
+
 ## Support
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/ernestkoe)
