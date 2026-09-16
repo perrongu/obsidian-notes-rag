@@ -119,3 +119,18 @@ class TestTruncateForEmbedding:
         enc = tiktoken.get_encoding("cl100k_base")
         truncated = _truncate_for_embedding(long_text)
         assert len(enc.encode(truncated, disallowed_special=())) == _OPENAI_MAX_TOKENS
+
+    def test_skips_the_tokenizer_when_the_text_fits_in_bytes(self, monkeypatch):
+        """Every tiktoken token covers at least one byte, so a text under the limit in bytes cannot exceed it."""
+
+        def must_not_tokenize(*_args, **_kwargs):
+            raise AssertionError("tokenizer must not run for text under the byte limit")
+
+        monkeypatch.setattr(tiktoken, "encoding_for_model", must_not_tokenize)
+        monkeypatch.setattr(tiktoken, "get_encoding", must_not_tokenize)
+        text = "é" * (_OPENAI_MAX_TOKENS // 2)  # 2 bytes per char: exactly at the byte limit
+        assert _truncate_for_embedding(text) == text
+
+    def test_tokenizes_when_the_text_exceeds_the_byte_limit_but_not_the_token_limit(self):
+        text = "a" * (_OPENAI_MAX_TOKENS + 1)  # more bytes than the limit, far fewer tokens
+        assert _truncate_for_embedding(text) == text

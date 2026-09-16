@@ -345,9 +345,14 @@ def _truncate_for_embedding(
 ) -> str:
     """Truncate text to fit within the model's token limit.
 
-    Uses tiktoken if available (with model-specific encoding); falls back to
-    a conservative 4 chars/token estimate.
+    Every tiktoken token covers at least one UTF-8 byte, so a text that fits in
+    ``max_tokens`` bytes cannot exceed ``max_tokens`` tokens and is returned
+    without tokenizing (the common case for chunked notes). Longer texts are
+    counted with tiktoken (model-specific encoding); if tiktoken is missing,
+    a conservative 4 chars/token estimate is used instead.
     """
+    if len(text.encode("utf-8")) <= max_tokens:
+        return text
     try:
         import tiktoken
 
