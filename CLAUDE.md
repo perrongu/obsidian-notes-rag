@@ -25,7 +25,7 @@ Custom modifications vs upstream v1.1.2:
 - Filter column validation in store queries (`store.py`)
 - Lazy config loading in watcher (`watcher.py`)
 - Shared provider -> embedder resolution (`embedders.py`) used by CLI, watcher and server
-- MCP server on mcp 2.x `MCPServer` (upstream pins `mcp<2`): per-singleton locks for lazy init, single-flight `reindex`, failures raised as `ToolError` (`server.py`)
+- MCP server on mcp 2.x `MCPServer` (upstream pins `mcp<2`): per-singleton locks for lazy init, single-flight `reindex`, failures raised as `ToolError`; optional tool arguments use sentinel defaults (`_OptionalInt`/`_OptionalStr`/`_OptionalBool`) with a concrete `type` and no published `default`, because Claude Desktop's MCP proxy rejects omitted arguments that carry `default` (`server.py`)
 
 ## Commands
 

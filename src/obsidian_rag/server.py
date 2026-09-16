@@ -7,11 +7,11 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, ParamSpec, TypeVar
+from typing import Annotated, Any, ParamSpec, TypeVar
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, Field
 
 from . import __version__
 from .config import Config, load_config
@@ -47,12 +47,28 @@ _SIMILAR_OVERFETCH = 10
 P = ParamSpec("P")
 R = TypeVar("R")
 
-# Optional tool arguments use concrete sentinel defaults (0 / "") instead of
-# ``X | None = None``: the SDK publishes ``X | None`` as ``anyOf [X, null]`` and
-# some MCP clients (Claude Code) then reject calls that omit the argument. The
-# validators keep an explicit ``null`` working by mapping it to the sentinel.
-_OptionalInt = Annotated[int, BeforeValidator(lambda v: 0 if v is None else v)]
-_OptionalStr = Annotated[str, BeforeValidator(lambda v: "" if v is None else v)]
+
+def _drop_schema_default(schema: dict[str, Any]) -> None:
+    """Pydantic ``json_schema_extra`` hook: publish the parameter without its ``default``.
+
+    Pydantic hands the hook the property schema it is about to emit and expects
+    it to be edited in place; this is the library's contract, not a choice.
+    """
+    schema.pop("default", None)
+
+
+# Optional tool arguments use concrete sentinel defaults (0 / "" / False) with a
+# concrete ``type`` instead of ``X | None = None``, and the sentinel is *not*
+# published as ``default``. Claude Desktop proxies local MCP servers for its
+# Claude Code sessions and rebuilds every tool schema with zod: a property that
+# carries ``default`` becomes a ``prefault`` that the proxy's ``McpServer`` then
+# treats as non-optional, so omitting the argument fails client-side with
+# ``expected nonoptional``. The docstrings describe the sentinels instead, and
+# the validators keep an explicit ``null`` working by mapping it to the sentinel.
+_NO_SCHEMA_DEFAULT = Field(json_schema_extra=_drop_schema_default)
+_OptionalInt = Annotated[int, BeforeValidator(lambda v: 0 if v is None else v), _NO_SCHEMA_DEFAULT]
+_OptionalStr = Annotated[str, BeforeValidator(lambda v: "" if v is None else v), _NO_SCHEMA_DEFAULT]
+_OptionalBool = Annotated[bool, BeforeValidator(lambda v: False if v is None else v), _NO_SCHEMA_DEFAULT]
 
 
 def _resolve_limit(limit: int, default: int) -> int:
@@ -269,14 +285,14 @@ def _index_files(indexer: VaultIndexer, store: VectorStore, files: list[Path]) -
 
 @mcp.tool()
 @_raise_tool_errors
-def reindex(clear: bool = False, path_filter: _OptionalStr = "") -> dict:
+def reindex(clear: _OptionalBool = False, path_filter: _OptionalStr = "") -> dict:
     """Re-index the Obsidian vault.
 
     Only one reindex runs at a time; a second call while one is in progress
     fails immediately instead of clearing the store under the running one.
 
     Args:
-        clear: If True, clear existing index before re-indexing (default: False)
+        clear: If True, clear existing index before re-indexing (omitted = keep it)
         path_filter: Path prefix to limit indexing, e.g. "Daily Notes/" (empty = whole vault)
 
     Returns:
@@ -302,13 +318,14 @@ def reindex(clear: bool = False, path_filter: _OptionalStr = "") -> dict:
             files = [f for f in files if str(f.relative_to(indexer.vault_path)).startswith(path_filter)]
 
         file_count, chunk_count, errors = _index_files(indexer, store, files)
+        total_in_store = store.get_stats()["count"]
     finally:
         _reindex_lock.release()
 
     return {
         "files_indexed": file_count,
         "chunks_created": chunk_count,
-        "total_in_store": store.get_stats()["count"],
+        "total_in_store": total_in_store,
         "errors": errors if errors else None,
         "path_filter": path_filter or None,
         "cleared": clear,
