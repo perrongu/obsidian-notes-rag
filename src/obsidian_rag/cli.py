@@ -5,8 +5,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
-from functools import partial
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,16 @@ import click
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-from .config import PROVIDER_URL_ENV, Config, get_config_path, get_data_dir, load_config, save_config
+from .config import (
+    PROVIDER_URL_ENV,
+    Config,
+    absolute_path,
+    get_config_path,
+    get_data_dir,
+    load_config,
+    resolve_path_case,
+    save_config,
+)
 from .defaults import (
     DEFAULT_LMSTUDIO_MODEL,
     DEFAULT_LMSTUDIO_URL,
@@ -67,8 +75,9 @@ def main(ctx, vault, data, provider, ollama_url, lmstudio_url, model):
     # Load config from file, then apply CLI overrides
     config = load_config()
 
-    ctx.obj["vault"] = vault or config.vault_path or ""
-    ctx.obj["data"] = data or config.get_data_path()
+    # CLI paths are normalized here the same way load_config normalizes config.toml and the environment
+    ctx.obj["vault"] = resolve_path_case(vault) if vault else config.vault_path or ""
+    ctx.obj["data"] = absolute_path(data) if data else config.get_data_path()
     # Raw CLI overrides (None when absent); precedence over config is applied once, in resolve_embedder_settings
     ctx.obj["overrides"] = {
         "provider": provider,
@@ -132,15 +141,23 @@ def _prompt_provider() -> str:
     return PROVIDERS[int(choice) - 1]
 
 
-def _prompt_openai() -> dict[str, str | None]:
-    """Config fields for OpenAI: the key is only stored when the user asks for it."""
-    existing_key = Config().get_openai_api_key()  # environment, then macOS Keychain
+@dataclass(frozen=True)
+class _ProviderAnswers:
+    """Config fields collected for a provider, and whether the API key among them may be written to config.toml."""
+
+    fields: dict[str, Any]
+    persist_api_key: bool = True
+
+
+def _prompt_openai() -> _ProviderAnswers:
+    """Config fields for OpenAI: the key is kept for this run but only stored when the user asks for it."""
+    existing_key = Config().get_openai_api_key()  # environment, then macOS Keychain: the wizard's only read
     if existing_key:
         click.echo("\n✓ Found OPENAI_API_KEY (environment or Keychain)")
         keep = click.confirm("Save API key to config file?", default=False)
-        return {"openai_api_key": existing_key if keep else None}
+        return _ProviderAnswers({"openai_api_key": existing_key}, persist_api_key=keep)
     click.echo("\nNo OPENAI_API_KEY found in environment or Keychain.")
-    return {"openai_api_key": click.prompt("Enter your OpenAI API key", hide_input=True)}
+    return _ProviderAnswers({"openai_api_key": click.prompt("Enter your OpenAI API key", hide_input=True)})
 
 
 def _choose_model(models: list[str], other_label: str, other_prompt: str) -> str:
@@ -219,38 +236,41 @@ def _prompt_local_provider(spec: _LocalProvider) -> dict[str, str]:
     return {spec.url_field: url, spec.model_field: model}
 
 
-_PROVIDER_PROMPTS: dict[str, Callable[[], dict[str, Any]]] = {
+_PROVIDER_PROMPTS: dict[str, Callable[[], _ProviderAnswers]] = {
     "openai": _prompt_openai,
-    "ollama": partial(_prompt_local_provider, _OLLAMA),
-    "lmstudio": partial(_prompt_local_provider, _LMSTUDIO),
+    "ollama": lambda: _ProviderAnswers(_prompt_local_provider(_OLLAMA)),
+    "lmstudio": lambda: _ProviderAnswers(_prompt_local_provider(_LMSTUDIO)),
 }
 
 
 def _prompt_vault_path() -> str | None:
-    """Ask until an existing directory is given; ``None`` when the user gives up."""
+    """Ask until an existing directory is given; returns its canonical path, ``None`` when the user gives up."""
     while True:
-        vault_path = os.path.expanduser(click.prompt("\nPath to your Obsidian vault"))
-        if Path(vault_path).exists():
-            md_files = list(Path(vault_path).rglob("*.md"))
-            click.echo(f"✓ Vault found ({len(md_files)} markdown files)")
-            return vault_path
+        vault_path = absolute_path(click.prompt("\nPath to your Obsidian vault"))
+        # os.path.isdir answers False for an unreadable parent where Path.is_dir() raises PermissionError.
+        # No file count here: walking a large iCloud vault is slow and the initial indexing reports it anyway.
+        if os.path.isdir(vault_path):
+            click.echo("✓ Vault found")
+            return resolve_path_case(vault_path)  # the form config.toml stores, used for the whole run
         click.echo(f"✗ Directory not found: {vault_path}")
         if not click.confirm("Try again?", default=True):
             click.echo("Setup cancelled.")
             return None
 
 
-def _prompt_data_path() -> str:
-    data_path = click.prompt("\nWhere to store the search index?", default=str(get_data_dir()))
-    return os.path.expanduser(data_path)
+def _prompt_data_path() -> str | None:
+    """Ask where to store the index; ``None`` when the default is kept so config.toml does not pin it."""
+    default = absolute_path(str(get_data_dir()))  # platformdirs passes a relative XDG_DATA_HOME through verbatim
+    data_path = absolute_path(click.prompt("\nWhere to store the search index?", default=default))
+    return None if data_path == default else data_path
 
 
-def _maybe_initial_index(config: Config, vault_path: str) -> None:
+def _maybe_initial_index(config: Config, vault_path: str, settings: EmbedderSettings) -> None:
     if not click.confirm("\nRun initial indexing now?", default=True):
         return
     click.echo("\nIndexing vault...")
     try:
-        embedder = resolve_embedder_settings(config).create()
+        embedder = settings.create()
         store = VectorStore(data_path=config.get_data_path())
         indexer = VaultIndexer(vault_path=vault_path, embedder=embedder, config=config.indexer)
         files = list(indexer.iter_markdown_files())
@@ -262,7 +282,7 @@ def _maybe_initial_index(config: Config, vault_path: str) -> None:
         click.echo("You can run indexing later with: obsidian-notes-rag index")
 
 
-def _maybe_install_service(config: Config, vault_path: str) -> None:
+def _maybe_install_service(config: Config, vault_path: str, settings: EmbedderSettings) -> None:
     click.echo("\nThe watcher service auto-indexes notes when they change.")
     if sys.platform != "darwin":
         # Linux/Windows: no background service support yet
@@ -272,7 +292,6 @@ def _maybe_install_service(config: Config, vault_path: str) -> None:
     if not click.confirm("Install watcher as a background service?", default=True):
         return
     try:
-        settings = resolve_embedder_settings(config)
         _install_watcher_service(vault_path, config.get_data_path(), settings.provider, settings.base_url)
     except ServiceInstallError as e:
         click.echo(f"✗ Error starting service: {e}", err=True)
@@ -282,6 +301,17 @@ def _maybe_install_service(config: Config, vault_path: str) -> None:
     else:
         click.echo("✓ Watcher service installed and started")
         click.echo(f"  Logs: {LOG_DIR}/watcher.log")
+
+
+def _resolve_wizard_settings(config: Config) -> EmbedderSettings | None:
+    """The embedder for the optional steps, or ``None`` after a one-line message; never a traceback."""
+    try:
+        return resolve_embedder_settings(config)
+    except EmbedderConfigError as e:  # unreachable via the menus: the key and provider were just collected
+        click.echo(f"\n✗ {e}", err=True)
+        click.echo("  Skipping indexing and the watcher service. Once fixed, run:")
+        click.echo("  obsidian-notes-rag index && obsidian-notes-rag install-service")
+        return None
 
 
 def _print_next_steps() -> None:
@@ -299,15 +329,19 @@ def setup():
         return
 
     provider = _prompt_provider()
-    provider_fields = _PROVIDER_PROMPTS[provider]()
+    answers = _PROVIDER_PROMPTS[provider]()
     vault_path = _prompt_vault_path()
     if vault_path is None:
         return
-    config = Config(provider=provider, vault_path=vault_path, data_path=_prompt_data_path(), **provider_fields)
+    config = Config(provider=provider, vault_path=vault_path, data_path=_prompt_data_path(), **answers.fields)
+    saved = config if answers.persist_api_key else replace(config, openai_api_key=None)
 
-    click.echo(f"\n✓ Configuration saved to {save_config(config)}")
-    _maybe_initial_index(config, vault_path)
-    _maybe_install_service(config, vault_path)
+    click.echo(f"\n✓ Configuration saved to {save_config(saved)}")
+    # Resolved once, from the config that still holds the key found by _prompt_openai: no second Keychain read
+    settings = _resolve_wizard_settings(config)
+    if settings is not None:
+        _maybe_initial_index(config, vault_path, settings)
+        _maybe_install_service(config, vault_path, settings)
     _print_next_steps()
 
 

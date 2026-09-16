@@ -48,15 +48,27 @@ def _get_keychain_value(service: str, account: str = APP_NAME) -> str | None:
         return None
 
 
+def absolute_path(path: str) -> str:
+    """Expand ``~`` and anchor a relative path to the cwd; the path need not exist.
+
+    Applied at every boundary a data path crosses (CLI options, wizard prompt, config
+    file, environment) so launchd's ``WorkingDirectory`` and the plist never carry a
+    relative or tilde path that launchd would resolve from ``/``.
+    """
+    return os.path.abspath(os.path.expanduser(path))
+
+
 def resolve_path_case(path: str) -> str:
     """Resolve a path to its correct case on case-insensitive filesystems.
 
     On macOS, the filesystem is case-insensitive but case-preserving.
     Watchdog requires the exact case to detect file changes properly.
+    The result is always absolute: a path that does not exist yet (vault not
+    mounted) is only expanded and anchored, never returned as typed.
     """
-    p = Path(path).expanduser()
+    p = Path(absolute_path(path))
     if not p.exists():
-        return path
+        return str(p)
 
     # On macOS, use the real path which preserves correct case
     if sys.platform == "darwin":
@@ -152,7 +164,9 @@ def load_config() -> Config:
             vault_path = data.get("vault_path", config.vault_path)
             if vault_path:
                 config.vault_path = resolve_path_case(vault_path)
-            config.data_path = data.get("data_path", config.data_path)
+            data_path = data.get("data_path", config.data_path)
+            if data_path:
+                config.data_path = absolute_path(data_path)
 
             # OpenAI settings
             if "openai" in data:
@@ -182,7 +196,7 @@ def load_config() -> Config:
     if os.environ.get("OBSIDIAN_RAG_VAULT"):
         config.vault_path = resolve_path_case(os.environ["OBSIDIAN_RAG_VAULT"])
     if os.environ.get("OBSIDIAN_RAG_DATA"):
-        config.data_path = os.environ["OBSIDIAN_RAG_DATA"]
+        config.data_path = absolute_path(os.environ["OBSIDIAN_RAG_DATA"])
     for provider, env_name in PROVIDER_URL_ENV.items():
         if os.environ.get(env_name):
             setattr(config, f"{provider}_url", os.environ[env_name])
@@ -214,7 +228,7 @@ def save_config(config: Config) -> Path:
     if config.vault_path:
         data["vault_path"] = resolve_path_case(config.vault_path)
     if config.data_path:
-        data["data_path"] = config.data_path
+        data["data_path"] = absolute_path(config.data_path)
 
     # OpenAI settings
     if config.provider == "openai" or config.openai_api_key:

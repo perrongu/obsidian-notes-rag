@@ -20,6 +20,7 @@ from click.testing import CliRunner, Result
 from obsidian_rag.cli import PLIST_NAME, WRAPPER_SCRIPT_NAME, main
 from obsidian_rag.config import PROVIDER_URL_ENV, Config, load_config
 from obsidian_rag.defaults import DEFAULT_LMSTUDIO_MODEL
+from obsidian_rag.embedders import EmbedderConfigError, resolve_embedder_settings
 
 OK = CompletedProcess([], 0, "", "")
 
@@ -103,7 +104,7 @@ class TestProviderSelection:
         assert config["provider"] == "openai"
         assert "openai" not in config
         assert config["vault_path"] == str(wizard_env.vault.resolve())
-        assert config["data_path"] == str(wizard_env.data_dir)
+        assert "data_path" not in config  # the default is resolved at run time, never pinned in the file
         assert not wizard_env.plist_path.exists()
 
     def test_openai_keychain_key_is_detected(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
@@ -187,6 +188,38 @@ class TestVaultAndConfigFile:
         assert "Setup cancelled." in result.output
         assert not wizard_env.config_path.exists()
 
+    def test_vault_path_must_be_a_directory(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        note = wizard_env.vault / "note.md"
+
+        result = run_setup(f"1\nn\n{note}\n\n{wizard_env.vault}\n\nn\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert f"Directory not found: {note}" in result.output
+        assert _config(wizard_env)["vault_path"] == str(wizard_env.vault.resolve())
+
+    def test_vault_check_does_not_walk_the_vault(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
+        """An iCloud vault with thousands of evicted files must not be walked just to print a count."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.setattr(Path, "rglob", MagicMock(side_effect=AssertionError("the wizard walked the vault")))
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\nn\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert "✓ Vault found" in result.output
+        assert "markdown files" not in result.output
+
+    def test_relative_vault_path_is_canonical_for_the_whole_run(self, wizard_env, monkeypatch, tmp_path: Path):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.chdir(tmp_path)
+
+        result = run_setup("1\nn\nvault\n\nn\n\n")
+
+        assert result.exit_code == 0, result.output
+        canonical = str(wizard_env.vault.resolve())
+        assert _config(wizard_env)["vault_path"] == canonical
+        assert _plist(wizard_env)["EnvironmentVariables"]["OBSIDIAN_RAG_VAULT"] == canonical
+
     def test_existing_config_overwrite_declined(self, wizard_env):
         wizard_env.config_path.parent.mkdir(parents=True)
         wizard_env.config_path.write_text('provider = "ollama"\n')
@@ -196,6 +229,60 @@ class TestVaultAndConfigFile:
         assert result.exit_code == 0, result.output
         assert "Setup cancelled." in result.output
         assert wizard_env.config_path.read_text() == 'provider = "ollama"\n'
+
+
+class TestEmbedderResolution:
+    @pytest.fixture
+    def resolve_calls(self, monkeypatch: pytest.MonkeyPatch) -> list[Config]:
+        """Record every embedder resolution the wizard performs; each one may cost a Keychain read."""
+        calls: list[Config] = []
+
+        def counting_resolve(config: Config, **overrides):
+            calls.append(config)
+            return resolve_embedder_settings(config, **overrides)
+
+        monkeypatch.setattr("obsidian_rag.cli.resolve_embedder_settings", counting_resolve)
+        return calls
+
+    @pytest.mark.parametrize("run_indexing", ["n", "y"], ids=["indexing-refused", "indexing-accepted"])
+    def test_wizard_resolves_the_embedder_once(self, wizard_env, monkeypatch, resolve_calls, run_indexing):
+        keychain_reads: list[str] = []
+
+        def fake_keychain(service: str, *_):
+            keychain_reads.append(service)
+            return "sk-keychain"
+
+        monkeypatch.setattr("obsidian_rag.config._get_keychain_value", fake_keychain)
+        monkeypatch.setattr("obsidian_rag.embedders.create_embedder", lambda **_: MagicMock())
+        monkeypatch.setattr("obsidian_rag.cli.VectorStore", MagicMock())
+        indexer = MagicMock()
+        indexer.return_value.iter_markdown_files.return_value = []
+        monkeypatch.setattr("obsidian_rag.cli.VaultIndexer", indexer)
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\n{run_indexing}\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert wizard_env.plist_path.exists()
+        assert len(resolve_calls) == 1
+        assert len(keychain_reads) == 1  # _prompt_openai's detection; the resolution reuses that key
+
+    def test_embedder_config_error_is_reported_in_one_line(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+
+        def failing_resolve(config: Config, **_):
+            raise EmbedderConfigError("bad embedder configuration")
+
+        monkeypatch.setattr("obsidian_rag.cli.resolve_embedder_settings", failing_resolve)
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Configuration saved" in result.output
+        assert "✗ bad embedder configuration" in result.output
+        assert "Traceback" not in result.output
+        assert "Run initial indexing now?" not in result.output  # both optional steps are skipped, not attempted
+        assert not wizard_env.plist_path.exists()
+        assert "Setup complete!" in result.output  # the saved configuration is still usable once fixed
 
 
 class TestServiceInstall:
@@ -218,6 +305,31 @@ class TestServiceInstall:
         assert plist["StandardOutPath"] == str(wizard_env.log_dir / "watcher.log")
         assert plist["WorkingDirectory"] == str(wizard_env.data_dir)
         assert f"Logs: {wizard_env.log_dir}/watcher.log" in result.output
+        assert "data_path" not in _config(wizard_env)  # typing the default is the same as accepting it
+
+    def test_accepting_a_relative_default_does_not_pin_it(self, wizard_env, monkeypatch, tmp_path: Path):
+        """platformdirs honours a relative XDG_DATA_HOME verbatim; the comparison must normalize both sides."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.setattr("obsidian_rag.cli.get_data_dir", lambda: Path("rel-data"))
+        monkeypatch.chdir(tmp_path)
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\nn\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert "data_path" not in _config(wizard_env)
+
+    def test_custom_data_path_is_saved_and_pinned_in_plist(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        custom = wizard_env.data_dir.parent / "custom-index"
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n{custom}\nn\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert _config(wizard_env)["data_path"] == str(custom)
+        plist = _plist(wizard_env)
+        assert plist["EnvironmentVariables"]["OBSIDIAN_RAG_DATA"] == str(custom)
+        assert plist["WorkingDirectory"] == str(custom)
+        assert custom.is_dir()
 
     @pytest.mark.parametrize(
         ("choice", "provider", "url"),
@@ -280,6 +392,41 @@ class TestServiceInstall:
         assert plist["EnvironmentVariables"]["OBSIDIAN_RAG_MODEL"] == "pinned"
         assert plist["WorkingDirectory"] == str(wizard_env.data_dir)
         assert wizard_env.launchctl_calls == [("load", wizard_env.plist_path)]
+
+    @pytest.mark.parametrize(
+        ("home", "given", "expected"),
+        [(None, "rel/dir", "rel/dir"), ("home", "~/idx", "home/idx")],
+        ids=["relative", "tilde"],
+    )
+    def test_install_service_writes_absolute_paths_for_data_option(
+        self, wizard_env, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, home, given, expected
+    ):
+        """launchd resolves a relative WorkingDirectory from /, so the service would never start."""
+        config = Config(vault_path=str(wizard_env.vault), openai_api_key="k")
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
+        monkeypatch.chdir(tmp_path)
+        if home:
+            monkeypatch.setenv("HOME", str(tmp_path / home))
+
+        result = CliRunner().invoke(main, ["--data", given, "install-service"])
+
+        assert result.exit_code == 0, result.output
+        plist = _plist(wizard_env)
+        assert plist["EnvironmentVariables"]["OBSIDIAN_RAG_DATA"] == str(tmp_path / expected)
+        assert plist["WorkingDirectory"] == str(tmp_path / expected)
+        assert (tmp_path / expected).is_dir()
+
+    def test_install_service_writes_canonical_path_for_vault_option(self, wizard_env, monkeypatch, tmp_path: Path):
+        """--vault gets the same realpath treatment as config.toml: watchdog needs the canonical root."""
+        config = Config(data_path=str(wizard_env.data_dir), openai_api_key="k")
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "link").symlink_to(wizard_env.vault)
+
+        result = CliRunner().invoke(main, ["--vault", "link", "install-service"])
+
+        assert result.exit_code == 0, result.output
+        assert _plist(wizard_env)["EnvironmentVariables"]["OBSIDIAN_RAG_VAULT"] == str(wizard_env.vault.resolve())
 
     def test_install_service_command_pins_lmstudio_url_under_its_own_key(self, wizard_env, monkeypatch):
         config = Config(vault_path=str(wizard_env.vault), data_path=str(wizard_env.data_dir))

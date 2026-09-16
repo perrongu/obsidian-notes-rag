@@ -24,6 +24,7 @@ Custom modifications vs upstream v1.1.2:
 - plistlib-based plist generation (`cli.py`)
 - Filter column validation in store queries (`store.py`)
 - Lazy config loading in watcher (`watcher.py`)
+- Path normalization at every boundary: `absolute_path()` (expanduser + abspath) for data paths from `--data`, the wizard, config.toml and `OBSIDIAN_RAG_DATA`; `resolve_path_case()` (absolute, then realpath when the path exists) for every vault path, so the launchd plist never carries a relative or tilde path (`config.py`, `cli.py`)
 - Shared provider -> embedder resolution (`embedders.py`) used by CLI, watcher and server
 - MCP server on mcp 2.x `MCPServer` (upstream pins `mcp<2`): per-singleton locks for lazy init, single-flight `reindex`, failures raised as `ToolError`; optional tool arguments use sentinel defaults (`_OptionalInt`/`_OptionalStr`/`_OptionalBool`) with a concrete `type` and no published `default`, because Claude Desktop's MCP proxy rejects omitted arguments that carry `default` (`server.py`)
 
@@ -78,7 +79,7 @@ Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → Vector
 ### Key Components (src/obsidian_rag/)
 
 - **defaults.py**: the provider defaults (`DEFAULT_PROVIDER`, `DEFAULT_*_MODEL`, `DEFAULT_*_URL`), a leaf module with no internal imports; every other module reads them from here instead of repeating the literals
-- **config.py**: `Config` dataclass with `get_openai_api_key()` (config → env → Keychain chain), `load_config()`/`save_config()` for TOML
+- **config.py**: `Config` dataclass with `get_openai_api_key()` (config → env → Keychain chain), `load_config()`/`save_config()` for TOML, `absolute_path()` and `resolve_path_case()` as the only path normalizers (see Custom modifications)
 - **indexer.py**: `VaultIndexer` scans markdown, `OpenAIEmbedder` with retry/truncation/batching, `create_embedder()` factory, `IndexerConfig` with `_make_defaults()` classmethod (derived from the dataclass field defaults)
 - **embedders.py**: `resolve_embedder_settings(config, **overrides)` -> frozen `EmbedderSettings` with `.create()`; the single place provider/model/base_url/API key are resolved (CLI, watcher, server). Raises `MissingApiKeyError` for OpenAI without a key
 - **store.py**: `VectorStore` wraps sqlite-vec, two tables (chunks + chunks_vec virtual table), thread-safe, filter column validation via `_ALLOWED_FILTER_COLUMNS`
@@ -146,7 +147,7 @@ git push origin custom/main
 ## Testing
 
 - `test_store.py` — VectorStore contract tests
-- `test_config.py` — shared provider defaults, `save_config` minimal output, TOML round-trip
+- `test_config.py` — shared provider defaults, `save_config` minimal output, TOML round-trip, `absolute_path`/`resolve_path_case` and path normalization in `load_config`
 - `test_indexer.py` — frontmatter parsing, chunk_markdown
 - `test_indexer_config.py` — IndexerConfig presets, serialization
 - `test_cli.py` — CLI commands, shared misconfiguration error across embedding commands

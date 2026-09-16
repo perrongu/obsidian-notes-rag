@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from obsidian_rag import defaults
-from obsidian_rag.config import Config, load_config, save_config
+from obsidian_rag.config import Config, absolute_path, load_config, resolve_path_case, save_config
 from obsidian_rag.indexer import LMStudioEmbedder, OllamaEmbedder
 
 
@@ -49,6 +49,10 @@ class TestSaveConfig:
     def test_default_config_writes_only_the_provider(self):
         assert _saved_toml(Config()) == {"provider": "openai"}
 
+    def test_data_path_is_written_absolute(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _saved_toml(Config(data_path="~/idx"))["data_path"] == str(tmp_path / "idx")
+
     def test_default_local_provider_settings_are_omitted(self):
         assert _saved_toml(Config(provider="ollama")) == {"provider": "ollama"}
         assert _saved_toml(Config(provider="lmstudio")) == {"provider": "lmstudio"}
@@ -59,6 +63,36 @@ class TestSaveConfig:
 
         data = _saved_toml(Config(provider="openai", openai_model="text-embedding-3-large", openai_api_key="k"))
         assert data["openai"] == {"api_key": "k", "model": "text-embedding-3-large"}
+
+
+class TestAbsolutePath:
+    def test_tilde_is_expanded(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert absolute_path("~/idx") == str(tmp_path / "idx")
+
+    def test_relative_path_is_anchored_to_the_cwd(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        monkeypatch.chdir(tmp_path)
+        assert absolute_path("rel/idx") == str(tmp_path / "rel" / "idx")
+
+    def test_absolute_path_is_unchanged_even_when_missing(self, tmp_path: Path):
+        missing = tmp_path / "nope" / "idx"
+        assert absolute_path(str(missing)) == str(missing)
+
+
+class TestResolvePathCase:
+    def test_missing_path_is_still_made_absolute(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        """A vault that is not mounted yet must not leave a tilde or relative path for launchd."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        assert resolve_path_case("~/missing-vault") == str(tmp_path / "missing-vault")
+        assert resolve_path_case("rel/missing-vault") == str(tmp_path / "rel" / "missing-vault")
+
+    def test_existing_symlink_resolves_to_its_target(self, tmp_path: Path):
+        target = tmp_path / "Vault"
+        target.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        assert resolve_path_case(str(link)) == str(target.resolve())
 
 
 class TestLoadConfig:
@@ -75,6 +109,24 @@ class TestLoadConfig:
         assert load_config() == Config(
             provider="lmstudio", vault_path=str(vault.resolve()), lmstudio_url="http://l:2", lmstudio_model="m"
         )
+
+    def test_env_data_path_is_made_absolute(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("OBSIDIAN_RAG_DATA", "~/idx")
+
+        assert load_config().data_path == str(tmp_path / "idx")
+
+    def test_env_vault_path_is_made_absolute_even_when_missing(self, monkeypatch, tmp_path: Path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("OBSIDIAN_RAG_VAULT", "~/missing-vault")
+
+        assert load_config().vault_path == str(tmp_path / "missing-vault")
+
+    def test_toml_data_path_is_made_absolute(self, isolated_config_file: Path, monkeypatch, tmp_path: Path):
+        isolated_config_file.write_text('provider = "openai"\ndata_path = "rel/idx"\n')
+        monkeypatch.chdir(tmp_path)
+
+        assert load_config().data_path == str(tmp_path / "rel" / "idx")
 
     def test_openai_section_without_api_key_keeps_model_and_no_key(self, isolated_config_file: Path):
         isolated_config_file.write_text('provider = "openai"\n\n[openai]\nmodel = "text-embedding-3-large"\n')
