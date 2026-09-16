@@ -20,6 +20,7 @@ from click.testing import CliRunner, Result
 from obsidian_rag.cli import PLIST_NAME, WRAPPER_SCRIPT_NAME, main
 from obsidian_rag.config import PROVIDER_URL_ENV, Config, load_config
 from obsidian_rag.defaults import DEFAULT_LMSTUDIO_MODEL
+from obsidian_rag.embedders import EmbedderConfigError, resolve_embedder_settings
 
 OK = CompletedProcess([], 0, "", "")
 
@@ -217,6 +218,58 @@ class TestVaultAndConfigFile:
         assert result.exit_code == 0, result.output
         assert "Setup cancelled." in result.output
         assert wizard_env.config_path.read_text() == 'provider = "ollama"\n'
+
+
+class TestEmbedderResolution:
+    @pytest.fixture
+    def resolve_calls(self, monkeypatch: pytest.MonkeyPatch) -> list[Config]:
+        """Record every embedder resolution the wizard performs; each one may cost a Keychain read."""
+        calls: list[Config] = []
+
+        def counting_resolve(config: Config, **overrides):
+            calls.append(config)
+            return resolve_embedder_settings(config, **overrides)
+
+        monkeypatch.setattr("obsidian_rag.cli.resolve_embedder_settings", counting_resolve)
+        return calls
+
+    @pytest.mark.parametrize("run_indexing", ["n", "y"], ids=["indexing-refused", "indexing-accepted"])
+    def test_wizard_resolves_the_embedder_once(self, wizard_env, monkeypatch, resolve_calls, run_indexing):
+        keychain_reads: list[str] = []
+
+        def fake_keychain(service: str, *_):
+            keychain_reads.append(service)
+            return "sk-keychain"
+
+        monkeypatch.setattr("obsidian_rag.config._get_keychain_value", fake_keychain)
+        monkeypatch.setattr("obsidian_rag.embedders.create_embedder", lambda **_: MagicMock())
+        monkeypatch.setattr("obsidian_rag.cli.VectorStore", MagicMock())
+        indexer = MagicMock()
+        indexer.return_value.iter_markdown_files.return_value = []
+        monkeypatch.setattr("obsidian_rag.cli.VaultIndexer", indexer)
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\n{run_indexing}\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert wizard_env.plist_path.exists()
+        assert len(resolve_calls) == 1
+        assert len(keychain_reads) == 2  # once to detect the key in _prompt_openai, once to resolve the embedder
+
+    def test_embedder_config_error_is_reported_in_one_line(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+
+        def failing_resolve(config: Config, **_):
+            raise EmbedderConfigError("bad embedder configuration")
+
+        monkeypatch.setattr("obsidian_rag.cli.resolve_embedder_settings", failing_resolve)
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\ny\n\n")
+
+        assert result.exit_code == 1
+        assert "Configuration saved" in result.output
+        assert "Error: bad embedder configuration" in result.output
+        assert "Traceback" not in result.output
+        assert not wizard_env.plist_path.exists()
 
 
 class TestServiceInstall:

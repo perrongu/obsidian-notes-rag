@@ -247,12 +247,12 @@ def _prompt_data_path() -> str | None:
     return None if data_path == default else data_path
 
 
-def _maybe_initial_index(config: Config, vault_path: str) -> None:
+def _maybe_initial_index(config: Config, vault_path: str, settings: EmbedderSettings) -> None:
     if not click.confirm("\nRun initial indexing now?", default=True):
         return
     click.echo("\nIndexing vault...")
     try:
-        embedder = resolve_embedder_settings(config).create()
+        embedder = settings.create()
         store = VectorStore(data_path=config.get_data_path())
         indexer = VaultIndexer(vault_path=vault_path, embedder=embedder, config=config.indexer)
         files = list(indexer.iter_markdown_files())
@@ -264,7 +264,7 @@ def _maybe_initial_index(config: Config, vault_path: str) -> None:
         click.echo("You can run indexing later with: obsidian-notes-rag index")
 
 
-def _maybe_install_service(config: Config, vault_path: str) -> None:
+def _maybe_install_service(config: Config, vault_path: str, settings: EmbedderSettings) -> None:
     click.echo("\nThe watcher service auto-indexes notes when they change.")
     if sys.platform != "darwin":
         # Linux/Windows: no background service support yet
@@ -274,7 +274,6 @@ def _maybe_install_service(config: Config, vault_path: str) -> None:
     if not click.confirm("Install watcher as a background service?", default=True):
         return
     try:
-        settings = resolve_embedder_settings(config)
         _install_watcher_service(vault_path, config.get_data_path(), settings.provider, settings.base_url)
     except ServiceInstallError as e:
         click.echo(f"✗ Error starting service: {e}", err=True)
@@ -308,8 +307,13 @@ def setup():
     config = Config(provider=provider, vault_path=vault_path, data_path=_prompt_data_path(), **provider_fields)
 
     click.echo(f"\n✓ Configuration saved to {save_config(config)}")
-    _maybe_initial_index(config, vault_path)
-    _maybe_install_service(config, vault_path)
+    # Resolved once: for openai without a saved key each resolution may read the macOS Keychain
+    try:
+        settings = resolve_embedder_settings(config)
+    except EmbedderConfigError as e:  # unreachable via the menus, but never a traceback
+        raise click.ClickException(str(e)) from e
+    _maybe_initial_index(config, vault_path, settings)
+    _maybe_install_service(config, vault_path, settings)
     _print_next_steps()
 
 
