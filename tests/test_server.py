@@ -97,6 +97,28 @@ class TestGetStats:
         assert "db locked" in _text(result)
 
 
+class TestGetEmbedder:
+    def test_builds_embedder_from_config_once(self, monkeypatch: pytest.MonkeyPatch):
+        factory = MagicMock(return_value=MagicMock(name="embedder"))
+        monkeypatch.setattr("obsidian_rag.embedders.create_embedder", factory)
+        monkeypatch.setattr(server, "_config", Config(provider="ollama", ollama_url="http://o:1", ollama_model="nomic"))
+
+        first = server.get_embedder()
+        second = server.get_embedder()
+
+        assert first is second is factory.return_value
+        factory.assert_called_once_with(provider="ollama", model="nomic", base_url="http://o:1", api_key=None)
+
+    def test_missing_key_reaches_the_client_as_error_result(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(server, "_config", Config(provider="openai"))
+        monkeypatch.setattr(server, "_store", MagicMock())
+
+        result = _call_tool("search_notes", {"query": "hello"})
+
+        assert result.is_error is True
+        assert "OPENAI_API_KEY not set" in _text(result)
+
+
 class TestSearchNotes:
     def test_returns_structured_hits(self, monkeypatch: pytest.MonkeyPatch):
         embedder = MagicMock()
@@ -205,20 +227,6 @@ class TestReindex:
         store.clear.assert_called_once()
         assert server._reindex_lock.acquire(blocking=False)
         server._reindex_lock.release()
-
-
-class TestBuildEmbedder:
-    def test_openai_without_key_fails_fast(self, monkeypatch: pytest.MonkeyPatch):
-        config = Config(provider="openai")
-        monkeypatch.setattr(Config, "get_openai_api_key", lambda self: None)
-        with pytest.raises(RuntimeError, match="OPENAI_API_KEY not set"):
-            server._build_embedder(config)
-
-    def test_ollama_uses_configured_url_and_model(self, monkeypatch: pytest.MonkeyPatch):
-        factory = MagicMock()
-        monkeypatch.setattr(server, "create_embedder", factory)
-        server._build_embedder(Config(provider="ollama", ollama_url="http://ollama:1", ollama_model="nomic"))
-        factory.assert_called_once_with(provider="ollama", model="nomic", base_url="http://ollama:1", api_key=None)
 
 
 def _run_in_threads(fn, count: int) -> tuple[list, list[BaseException]]:

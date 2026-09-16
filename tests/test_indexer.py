@@ -110,3 +110,12 @@ class TestTruncateForEmbedding:
         text = "alpha beta gamma delta epsilon zeta eta theta"
         truncated = _truncate_for_embedding(text, max_tokens=3, model="unknown-model")
         assert enc.encode(truncated) == enc.encode(text)[:3]
+
+    def test_literal_special_token_text_is_counted_as_plain_text(self):
+        """Notes quoting prompt markup like <|endoftext|> must not be rejected by tiktoken."""
+        text = "The prompt ends with <|endoftext|> and continues."
+        assert _truncate_for_embedding(text) == text
+        long_text = ("<|endoftext|> " * (_OPENAI_MAX_TOKENS * 2)).strip()
+        enc = tiktoken.get_encoding("cl100k_base")
+        truncated = _truncate_for_embedding(long_text)
+        assert len(enc.encode(truncated, disallowed_special=())) == _OPENAI_MAX_TOKENS

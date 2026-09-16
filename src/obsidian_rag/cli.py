@@ -13,9 +13,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
 from .config import Config, get_config_path, get_data_dir, load_config, save_config
+from .embedders import EmbedderConfigError, EmbedderSettings, resolve_embedder_settings
 from .indexer import (
+    PROVIDERS,
     VaultIndexer,
-    create_embedder,
     get_lmstudio_models,
     get_ollama_models,
     is_lmstudio_running,
@@ -26,13 +27,21 @@ from .store import VectorStore
 from .watcher import VaultWatcher
 
 
+def _embedder_settings(ctx: click.Context) -> EmbedderSettings:
+    """Resolve the embedder from config plus the global CLI overrides; fail with a one-line error if misconfigured."""
+    try:
+        return resolve_embedder_settings(ctx.obj["config"], **ctx.obj["overrides"])
+    except EmbedderConfigError as e:
+        raise click.ClickException(str(e)) from e
+
+
 @click.group()
 @click.option("--vault", default=None, help="Path to Obsidian vault")
 @click.option("--data", default=None, help="Path to vector store data")
 @click.option(
     "--provider",
     default=None,
-    type=click.Choice(["openai", "ollama", "lmstudio"]),
+    type=click.Choice(list(PROVIDERS)),
     help="Embedding provider (default: openai)",
 )
 @click.option("--ollama-url", default=None, help="Ollama API URL (only used with --provider ollama)")
@@ -48,10 +57,13 @@ def main(ctx, vault, data, provider, ollama_url, lmstudio_url, model):
 
     ctx.obj["vault"] = vault or config.vault_path or ""
     ctx.obj["data"] = data or config.get_data_path()
-    ctx.obj["provider"] = provider or config.provider
-    ctx.obj["ollama_url"] = ollama_url or config.ollama_url
-    ctx.obj["lmstudio_url"] = lmstudio_url or config.lmstudio_url
-    ctx.obj["model"] = model  # None means use provider default
+    # Raw CLI overrides (None when absent); precedence over config is applied once, in resolve_embedder_settings
+    ctx.obj["overrides"] = {
+        "provider": provider,
+        "model": model,
+        "ollama_url": ollama_url,
+        "lmstudio_url": lmstudio_url,
+    }
     ctx.obj["config"] = config
 
 
@@ -207,17 +219,7 @@ def setup():
     if click.confirm("\nRun initial indexing now?", default=True):
         click.echo("\nIndexing vault...")
         try:
-            # Create embedder based on provider
-            if config.provider == "openai":
-                embedder = create_embedder(
-                    provider="openai", model=config.openai_model, api_key=config.get_openai_api_key()
-                )
-            elif config.provider == "ollama":
-                embedder = create_embedder(provider="ollama", model=config.ollama_model, base_url=config.ollama_url)
-            else:  # lmstudio
-                embedder = create_embedder(
-                    provider="lmstudio", model=config.lmstudio_model, base_url=config.lmstudio_url
-                )
+            embedder = resolve_embedder_settings(config).create()
 
             store = VectorStore(data_path=config.get_data_path())
             indexer = VaultIndexer(vault_path=config.vault_path, embedder=embedder, config=config.indexer)
@@ -311,39 +313,16 @@ def index(ctx, clear, path_filter):
         click.echo("Error: No vault path configured. Run 'obsidian-rag setup' first.", err=True)
         sys.exit(1)
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
     config = ctx.obj["config"]
-
-    # Get model from CLI override or config file based on provider
-    model = ctx.obj["model"]
-    if model is None:
-        if provider == "openai":
-            model = config.openai_model
-        elif provider == "ollama":
-            model = config.ollama_model
-        elif provider == "lmstudio":
-            model = config.lmstudio_model
+    settings = _embedder_settings(ctx)
 
     click.echo(f"Indexing vault: {vault_path}")
     click.echo(f"Data path: {data_path}")
-    click.echo(f"Provider: {provider}")
-    click.echo(f"Model: {model}")
-
-    # Determine the correct base_url based on provider
-    if provider == "ollama":
-        base_url = ollama_url
-    elif provider == "lmstudio":
-        base_url = lmstudio_url
-    else:
-        base_url = None
-
-    # Resolve API key for OpenAI (config → env → Keychain)
-    api_key = config.get_openai_api_key() if provider == "openai" else None
+    click.echo(f"Provider: {settings.provider}")
+    click.echo(f"Model: {settings.model}")
 
     # Initialize components
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+    embedder = settings.create()
     store = VectorStore(data_path=data_path)
     indexer = VaultIndexer(vault_path=vault_path, embedder=embedder, config=config.indexer)
 
@@ -400,32 +379,7 @@ def index(ctx, clear, path_filter):
 def search(ctx, query, limit, note_type):
     """Search notes semantically."""
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
-    config = ctx.obj["config"]
-
-    # Get model from CLI override or config file based on provider
-    model = ctx.obj["model"]
-    if model is None:
-        if provider == "openai":
-            model = config.openai_model
-        elif provider == "ollama":
-            model = config.ollama_model
-        elif provider == "lmstudio":
-            model = config.lmstudio_model
-
-    # Determine the correct base_url based on provider
-    if provider == "ollama":
-        base_url = ollama_url
-    elif provider == "lmstudio":
-        base_url = lmstudio_url
-    else:
-        base_url = None
-
-    # Initialize components
-    api_key = config.get_openai_api_key() if provider == "openai" else None
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+    embedder = _embedder_settings(ctx).create()
     store = VectorStore(data_path=data_path)
 
     # Generate query embedding
@@ -474,29 +428,7 @@ def search(ctx, query, limit, note_type):
 def similar(ctx, note_path, limit):
     """Find notes similar to a given note."""
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
-    config = ctx.obj["config"]
-
-    model = ctx.obj["model"]
-    if model is None:
-        if provider == "openai":
-            model = config.openai_model
-        elif provider == "ollama":
-            model = config.ollama_model
-        elif provider == "lmstudio":
-            model = config.lmstudio_model
-
-    if provider == "ollama":
-        base_url = ollama_url
-    elif provider == "lmstudio":
-        base_url = lmstudio_url
-    else:
-        base_url = None
-
-    api_key = config.get_openai_api_key() if provider == "openai" else None
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+    embedder = _embedder_settings(ctx).create()
     store = VectorStore(data_path=data_path)
 
     click.echo(f"Finding notes similar to: {note_path}\n")
@@ -541,29 +473,7 @@ def similar(ctx, note_path, limit):
 def context(ctx, note_path, limit):
     """Get a note and its related context."""
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
-    config = ctx.obj["config"]
-
-    model = ctx.obj["model"]
-    if model is None:
-        if provider == "openai":
-            model = config.openai_model
-        elif provider == "ollama":
-            model = config.ollama_model
-        elif provider == "lmstudio":
-            model = config.lmstudio_model
-
-    if provider == "ollama":
-        base_url = ollama_url
-    elif provider == "lmstudio":
-        base_url = lmstudio_url
-    else:
-        base_url = None
-
-    api_key = config.get_openai_api_key() if provider == "openai" else None
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+    embedder = _embedder_settings(ctx).create()
     store = VectorStore(data_path=data_path)
 
     click.echo(f"Getting context for: {note_path}\n")
@@ -627,26 +537,16 @@ def watch(ctx, debounce):
         click.echo("Error: No vault path configured. Run 'obsidian-rag setup' first.", err=True)
         sys.exit(1)
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
-    model = ctx.obj["model"]
+    settings = _embedder_settings(ctx)
 
     click.echo(f"Watching vault: {vault_path}")
     click.echo(f"Data path: {data_path}")
-    click.echo(f"Provider: {provider}")
+    click.echo(f"Provider: {settings.provider}")
+    click.echo(f"Model: {settings.model}")
     click.echo(f"Debounce: {debounce}s")
     click.echo("Press Ctrl+C to stop.\n")
 
-    watcher = VaultWatcher(
-        vault_path=vault_path,
-        data_path=data_path,
-        provider=provider,
-        ollama_url=ollama_url,
-        lmstudio_url=lmstudio_url,
-        model=model,
-        debounce_delay=debounce,
-    )
+    watcher = VaultWatcher(vault_path=vault_path, data_path=data_path, settings=settings, debounce_delay=debounce)
     watcher.run_forever()
 
 
@@ -737,9 +637,11 @@ def install_service(ctx):
 
     vault_path = ctx.obj["vault"]
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    model = ctx.obj["model"]
+    settings = _embedder_settings(ctx)  # validates the provider and API key before installing the service
+    provider = settings.provider
+    ollama_url = settings.base_url or ctx.obj["config"].ollama_url
+    # Only an explicit --model is pinned in the plist; otherwise the service follows config.toml
+    model = ctx.obj["overrides"]["model"]
 
     plist_path = LAUNCH_AGENTS_DIR / PLIST_NAME
 

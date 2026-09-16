@@ -20,6 +20,8 @@ ollama pull nomic-embed-text
 src/obsidian_rag/
 ├── __init__.py      # Package version
 ├── cli.py           # Click CLI commands
+├── config.py        # Config dataclass, TOML load/save, API key resolution
+├── embedders.py     # Provider -> embedder resolution shared by CLI, watcher, server
 ├── server.py        # MCP server (mcp 2.x MCPServer)
 ├── indexer.py       # Markdown parsing, chunking, Ollama embeddings
 ├── store.py         # ChromaDB vector store wrapper

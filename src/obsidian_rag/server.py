@@ -13,7 +13,8 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .config import Config, load_config
-from .indexer import Embedder, VaultIndexer, create_embedder
+from .embedders import resolve_embedder_settings
+from .indexer import Embedder, VaultIndexer
 from .store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -54,27 +55,12 @@ def get_config() -> Config:
         return _config
 
 
-def _build_embedder(config: Config) -> Embedder:
-    """Create the embedder described by ``config`` (no caching)."""
-    if config.provider == "openai":
-        api_key = config.get_openai_api_key()
-        if not api_key:
-            raise RuntimeError(
-                "OPENAI_API_KEY not set. Configure via environment variable, "
-                "config.toml [openai] api_key, or macOS Keychain."
-            )
-        return create_embedder(provider="openai", model=config.openai_model, base_url=None, api_key=api_key)
-    if config.provider == "ollama":
-        return create_embedder(provider="ollama", model=config.ollama_model, base_url=config.ollama_url, api_key=None)
-    return create_embedder(provider="lmstudio", model=config.lmstudio_model, base_url=config.lmstudio_url, api_key=None)
-
-
 def get_embedder() -> Embedder:
     """Get or create embedder instance."""
     global _embedder
     with _embedder_lock:
         if _embedder is None:
-            _embedder = _build_embedder(get_config())
+            _embedder = resolve_embedder_settings(get_config()).create()
         return _embedder
 
 

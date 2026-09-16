@@ -1,5 +1,6 @@
 """Tests for CLI commands."""
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -20,7 +21,7 @@ def isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Config:
     """
     vault_path = tmp_path / "vault"
     vault_path.mkdir()
-    config = Config(vault_path=str(vault_path), data_path=str(tmp_path / "data"))
+    config = Config(vault_path=str(vault_path), data_path=str(tmp_path / "data"), openai_api_key="test-key")
     monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
     for name in ("OBSIDIAN_RAG_VAULT", "OBSIDIAN_RAG_DATA", "OBSIDIAN_RAG_PROVIDER", "OBSIDIAN_RAG_MODEL"):
         monkeypatch.delenv(name, raising=False)
@@ -32,7 +33,7 @@ class TestIndexCommand:
         """Verify --path-filter option is accepted and passed through."""
         runner = CliRunner()
         with (
-            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.embedders.create_embedder") as mock_embedder,
             patch("obsidian_rag.cli.VectorStore") as mock_store,
             patch("obsidian_rag.cli.VaultIndexer") as mock_indexer,
         ):
@@ -51,7 +52,7 @@ class TestSimilarCommand:
         """Verify similar command accepts note-path and displays results."""
         runner = CliRunner()
         with (
-            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.embedders.create_embedder") as mock_embedder,
             patch("obsidian_rag.cli.VectorStore") as mock_store,
         ):
             embedder_instance = MagicMock()
@@ -82,7 +83,7 @@ class TestContextCommand:
         """Verify context command shows note content and similar notes."""
         runner = CliRunner()
         with (
-            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.embedders.create_embedder") as mock_embedder,
             patch("obsidian_rag.cli.VectorStore") as mock_store,
         ):
             embedder_instance = MagicMock()
@@ -107,3 +108,41 @@ class TestContextCommand:
             assert result.exit_code == 0
             assert "Note content here" in result.output
             assert "related.md" in result.output
+
+
+class TestEmbedderResolution:
+    EMBEDDING_COMMANDS = [["index"], ["search", "anything"], ["similar", "n.md"], ["context", "n.md"], ["watch"]]
+
+    @pytest.mark.parametrize("args", EMBEDDING_COMMANDS, ids=lambda a: a[0])
+    def test_missing_openai_key_exits_with_clear_error(self, isolated_config, monkeypatch, args):
+        """Every embedding command shares one resolution path and one readable error."""
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: replace(isolated_config, openai_api_key=None))
+
+        result = CliRunner().invoke(main, args)
+
+        assert result.exit_code == 1
+        assert "Error: OPENAI_API_KEY not set" in result.output
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize("args", EMBEDDING_COMMANDS, ids=lambda a: a[0])
+    def test_unknown_provider_from_config_exits_with_clear_error(self, isolated_config, monkeypatch, args):
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: replace(isolated_config, provider="weird"))
+
+        result = CliRunner().invoke(main, args)
+
+        assert result.exit_code == 1
+        assert "Error: Unknown provider: weird" in result.output
+
+    def test_cli_overrides_reach_the_resolver(self, monkeypatch):
+        captured = {}
+
+        def fake_resolve(config, **overrides):
+            captured.update(overrides)
+            raise SystemExit(0)
+
+        monkeypatch.setattr("obsidian_rag.cli.resolve_embedder_settings", fake_resolve)
+        CliRunner().invoke(
+            main, ["--provider", "ollama", "--model", "mxbai", "--ollama-url", "http://o:1", "search", "q"]
+        )
+
+        assert captured == {"provider": "ollama", "model": "mxbai", "ollama_url": "http://o:1", "lmstudio_url": None}

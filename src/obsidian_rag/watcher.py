@@ -26,7 +26,8 @@ from watchdog.observers.api import BaseObserver
 
 from . import icloud
 from .config import load_config
-from .indexer import Embedder, IndexerConfig, VaultIndexer, create_embedder
+from .embedders import EmbedderConfigError, EmbedderSettings, resolve_embedder_settings
+from .indexer import Embedder, IndexerConfig, VaultIndexer
 from .retry_queue import MAX_RETRIES, RETRY_BASE_DELAY, RetryQueue, process_due
 from .store import VectorStore
 
@@ -325,55 +326,31 @@ class VaultWatcher:
         self,
         vault_path: str | None = None,
         data_path: str | None = None,
-        provider: str | None = None,
-        ollama_url: str | None = None,
-        lmstudio_url: str | None = None,
-        model: str | None = None,
+        settings: EmbedderSettings | None = None,
         debounce_delay: float | None = None,
     ):
         config = _get_config()
 
         vault_path = vault_path or config.vault_path or os.environ.get("OBSIDIAN_RAG_VAULT", "")
         data_path = data_path or config.get_data_path()
-        provider = provider or config.provider
-        ollama_url = ollama_url or config.ollama_url
-        lmstudio_url = lmstudio_url or config.lmstudio_url
         debounce_delay = (
             debounce_delay if debounce_delay is not None else float(os.environ.get("OBSIDIAN_RAG_DEBOUNCE", "2.0"))
         )
-
-        # Resolve model from config if not explicitly provided
-        if model is None:
-            if provider == "openai":
-                model = config.openai_model
-            elif provider == "ollama":
-                model = config.ollama_model
-            elif provider == "lmstudio":
-                model = config.lmstudio_model
+        # Resolved once, here or by the caller; the API key is passed directly, never via os.environ
+        settings = settings or resolve_embedder_settings(config)
 
         self.vault_path = Path(vault_path)
-        self.provider = provider
-        self.ollama_url = ollama_url
+        self.settings = settings
+        self.provider = settings.provider
+        self.ollama_url = settings.base_url or config.ollama_url
 
-        # Resolve API key from config, env, or Keychain — passed directly, never via os.environ
-        resolved_api_key = None
-        if provider == "openai":
-            resolved_api_key = config.get_openai_api_key()
+        # Health check for Ollama before starting
+        if self.provider == "ollama" and not check_ollama_health(self.ollama_url):
+            logger.warning("Ollama is not running! Waiting for it to start...")
+            send_notification("Obsidian RAG", "Waiting for Ollama to start...")
+            self._wait_for_ollama(self.ollama_url)
 
-        # Determine correct base_url based on provider
-        if provider == "ollama":
-            base_url = ollama_url
-            # Health check for Ollama before starting
-            if not check_ollama_health(ollama_url):
-                logger.warning("Ollama is not running! Waiting for it to start...")
-                send_notification("Obsidian RAG", "Waiting for Ollama to start...")
-                self._wait_for_ollama(ollama_url)
-        elif provider == "lmstudio":
-            base_url = lmstudio_url
-        else:
-            base_url = None
-
-        self.embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=resolved_api_key)
+        self.embedder = settings.create()
         self.store = VectorStore(data_path=data_path)
         self.debounce_delay = debounce_delay
         self.retry_queue = RetryQueue(
@@ -552,13 +529,18 @@ def run_watcher(
     # Configure logging with rotation support
     _setup_logging()
 
+    try:
+        settings = resolve_embedder_settings(
+            _get_config(), provider=provider, model=model, ollama_url=ollama_url, lmstudio_url=lmstudio_url
+        )
+    except EmbedderConfigError as e:
+        logger.error("Cannot start watcher: %s", e)
+        raise SystemExit(1) from e
+
     watcher = VaultWatcher(
         vault_path=vault_path,
         data_path=data_path,
-        provider=provider,
-        ollama_url=ollama_url,
-        lmstudio_url=lmstudio_url,
-        model=model,
+        settings=settings,
         debounce_delay=debounce or float(os.environ.get("OBSIDIAN_RAG_DEBOUNCE", "2.0")),
     )
     watcher.run_forever()

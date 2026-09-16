@@ -24,6 +24,7 @@ Custom modifications vs upstream v1.1.2:
 - plistlib-based plist generation (`cli.py`)
 - Filter column validation in store queries (`store.py`)
 - Lazy config loading in watcher (`watcher.py`)
+- Shared provider -> embedder resolution (`embedders.py`) used by CLI, watcher and server
 - MCP server on mcp 2.x `MCPServer` (upstream pins `mcp<2`): per-singleton locks for lazy init, single-flight `reindex`, failures raised as `ToolError` (`server.py`)
 
 ## Commands
@@ -78,6 +79,7 @@ Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → Vector
 
 - **config.py**: `Config` dataclass with `get_openai_api_key()` (config → env → Keychain chain), `load_config()`/`save_config()` for TOML
 - **indexer.py**: `VaultIndexer` scans markdown, `OpenAIEmbedder` with retry/truncation/batching, `create_embedder()` factory, `IndexerConfig` with `_make_defaults()` classmethod
+- **embedders.py**: `resolve_embedder_settings(config, **overrides)` -> frozen `EmbedderSettings` with `.create()`; the single place provider/model/base_url/API key are resolved (CLI, watcher, server). Raises `MissingApiKeyError` for OpenAI without a key
 - **store.py**: `VectorStore` wraps sqlite-vec, two tables (chunks + chunks_vec virtual table), thread-safe, filter column validation via `_ALLOWED_FILTER_COLUMNS`
 - **server.py**: `MCPServer` (mcp 2.x) with 5 tools (`search_notes`, `get_similar`, `get_note_context`, `get_stats`, `reindex`), failures raised as `ToolError` (client sees `is_error=True`), lock-guarded lazy-initialized globals and a single-flight `reindex` (mcp 2.x runs sync tools on worker threads)
 - **watcher.py**: `VaultWatcher` with watchdog, debouncing (2s), `_is_permanent_error()` classification, macOS notifications via safe AppleScript; `_try_index()` raises, `_index_file()` queues
@@ -145,7 +147,8 @@ git push origin custom/main
 - `test_store.py` — VectorStore contract tests
 - `test_indexer.py` — frontmatter parsing, chunk_markdown
 - `test_indexer_config.py` — IndexerConfig presets, serialization
-- `test_cli.py` — CLI commands
+- `test_cli.py` — CLI commands, shared misconfiguration error across embedding commands
+- `test_embedders.py` — provider -> embedder resolution, overrides, typed config errors
 - `test_server.py` — MCP tools driven through an in-process client, error results, reindex guard, thread-safe lazy init
 - `test_retry_queue.py` — RetryQueue backoff, give-up, snapshot semantics
 - `test_icloud.py` — dataless detection, EDEADLK classification, brctl invocation
