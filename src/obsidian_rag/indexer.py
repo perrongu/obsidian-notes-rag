@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,6 +15,14 @@ import tiktoken
 import yaml
 from chonkie import RecursiveChunker
 from chonkie.types.recursive import RecursiveLevel, RecursiveRules
+
+from .defaults import (
+    DEFAULT_LMSTUDIO_MODEL,
+    DEFAULT_LMSTUDIO_URL,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_URL,
+    DEFAULT_OPENAI_MODEL,
+)
 
 if TYPE_CHECKING:
     from openai.types import CreateEmbeddingResponse
@@ -51,20 +59,12 @@ class IndexerConfig:
 
     @classmethod
     def _make_defaults(cls, preset: str = "default") -> IndexerConfig:
-        """Create a baseline instance with raw defaults (bypassing __post_init__)."""
+        """Create a baseline instance from the declared field defaults, bypassing __post_init__."""
         obj = object.__new__(cls)
+        for f in fields(cls):
+            default = f.default_factory() if f.default_factory is not MISSING else f.default
+            setattr(obj, f.name, default)
         obj.preset = preset
-        obj.chunk_size = 1500
-        obj.chunk_overlap = 0  # reserved for future OverlapRefinery support
-        obj.min_characters_per_chunk = 50
-        obj.heading_split_depth = 4
-        obj.preserve_latex_blocks = False
-        obj.preserve_code_blocks = True
-        obj.similarity_threshold = 0.10
-        obj.default_search_limit = 10
-        obj.default_similar_limit = 5
-        obj.default_context_limit = 5
-        obj.extra_exclude_patterns = []
         return obj
 
     def _apply_preset_defaults(self):
@@ -342,7 +342,7 @@ _OPENAI_MAX_TOKENS = 8191
 def _truncate_for_embedding(
     text: str,
     max_tokens: int = _OPENAI_MAX_TOKENS,
-    model: str = "text-embedding-3-small",
+    model: str = DEFAULT_OPENAI_MODEL,
 ) -> str:
     """Truncate text to fit within the model's token limit.
 
@@ -370,7 +370,7 @@ class OpenAIEmbedder:
     _MAX_RETRIES = 3
     _RETRY_DELAYS = (1.0, 4.0, 16.0)
 
-    def __init__(self, model: str = "text-embedding-3-small", api_key: str | None = None):
+    def __init__(self, model: str = DEFAULT_OPENAI_MODEL, api_key: str | None = None):
         from openai import OpenAI
 
         self.client = OpenAI(api_key=api_key) if api_key else OpenAI()
@@ -423,7 +423,7 @@ class OpenAIEmbedder:
 class OllamaEmbedder:
     """Generate embeddings using Ollama (local)."""
 
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "nomic-embed-text"):
+    def __init__(self, base_url: str = DEFAULT_OLLAMA_URL, model: str = DEFAULT_OLLAMA_MODEL):
         self.base_url = base_url
         self.model = model
         self.client = httpx.Client(timeout=60.0)
@@ -459,7 +459,7 @@ class OllamaEmbedder:
 class LMStudioEmbedder:
     """Generate embeddings using LM Studio (local, OpenAI-compatible API)."""
 
-    def __init__(self, base_url: str = "http://localhost:1234", model: str = "text-embedding-nomic-embed-text-v1.5"):
+    def __init__(self, base_url: str = DEFAULT_LMSTUDIO_URL, model: str = DEFAULT_LMSTUDIO_MODEL):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.client = httpx.Client(timeout=60.0)
@@ -498,7 +498,7 @@ class LMStudioEmbedder:
         self.client.close()
 
 
-def is_lmstudio_running(base_url: str = "http://localhost:1234") -> bool:
+def is_lmstudio_running(base_url: str = DEFAULT_LMSTUDIO_URL) -> bool:
     """Check if LM Studio server is running."""
     try:
         with httpx.Client(timeout=2.0) as client:
@@ -508,7 +508,7 @@ def is_lmstudio_running(base_url: str = "http://localhost:1234") -> bool:
         return False
 
 
-def is_ollama_running(base_url: str = "http://localhost:11434") -> bool:
+def is_ollama_running(base_url: str = DEFAULT_OLLAMA_URL) -> bool:
     """Check if Ollama server is running."""
     try:
         with httpx.Client(timeout=2.0) as client:
@@ -518,7 +518,7 @@ def is_ollama_running(base_url: str = "http://localhost:11434") -> bool:
         return False
 
 
-def get_lmstudio_models(base_url: str = "http://localhost:1234") -> list[str]:
+def get_lmstudio_models(base_url: str = DEFAULT_LMSTUDIO_URL) -> list[str]:
     """Get list of available embedding models from LM Studio."""
     embedding_keywords = ["embed", "bge", "minilm", "e5", "gte", "instructor"]
     try:
@@ -537,7 +537,7 @@ def get_lmstudio_models(base_url: str = "http://localhost:1234") -> list[str]:
         return []
 
 
-def get_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
+def get_ollama_models(base_url: str = DEFAULT_OLLAMA_URL) -> list[str]:
     """Get list of available embedding models from Ollama."""
     embedding_keywords = ["embed", "bge", "minilm", "e5", "gte", "instructor", "nomic"]
     try:

@@ -17,14 +17,13 @@ def isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Config:
 
     The CLI group calls ``load_config()`` on every invocation; without this fixture the
     tests would read ``~/Library/Application Support/obsidian-notes-rag/config.toml`` and
-    the ``OBSIDIAN_RAG_*`` variables, so they pass or fail depending on the host machine.
+    pass or fail depending on the host machine (conftest.py scrubs the ``OBSIDIAN_RAG_*``
+    variables for the whole suite).
     """
     vault_path = tmp_path / "vault"
     vault_path.mkdir()
     config = Config(vault_path=str(vault_path), data_path=str(tmp_path / "data"), openai_api_key="test-key")
     monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
-    for name in ("OBSIDIAN_RAG_VAULT", "OBSIDIAN_RAG_DATA", "OBSIDIAN_RAG_PROVIDER", "OBSIDIAN_RAG_MODEL"):
-        monkeypatch.delenv(name, raising=False)
     return config
 
 

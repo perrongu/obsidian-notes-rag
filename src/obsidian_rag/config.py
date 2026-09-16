@@ -17,6 +17,14 @@ except ImportError:
 import tomli_w
 from platformdirs import user_config_dir, user_data_dir
 
+from .defaults import (
+    DEFAULT_LMSTUDIO_MODEL,
+    DEFAULT_LMSTUDIO_URL,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_URL,
+    DEFAULT_OPENAI_MODEL,
+    DEFAULT_PROVIDER,
+)
 from .indexer import IndexerConfig
 
 APP_NAME = "obsidian-notes-rag"
@@ -87,7 +95,7 @@ class Config:
     """Application configuration."""
 
     # Core settings
-    provider: str = "openai"
+    provider: str = DEFAULT_PROVIDER
     vault_path: str | None = None
     data_path: str | None = None
 
@@ -95,15 +103,15 @@ class Config:
     openai_api_key: str | None = None
 
     # Ollama settings
-    ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "nomic-embed-text"
+    ollama_url: str = DEFAULT_OLLAMA_URL
+    ollama_model: str = DEFAULT_OLLAMA_MODEL
 
     # LM Studio settings
-    lmstudio_url: str = "http://localhost:1234"
-    lmstudio_model: str = "text-embedding-nomic-embed-text-v1.5"
+    lmstudio_url: str = DEFAULT_LMSTUDIO_URL
+    lmstudio_model: str = DEFAULT_LMSTUDIO_MODEL
 
     # OpenAI model (optional override)
-    openai_model: str = "text-embedding-3-small"
+    openai_model: str = DEFAULT_OPENAI_MODEL
     indexer: IndexerConfig = field(default_factory=IndexerConfig)
 
     def get_data_path(self) -> str:
@@ -140,7 +148,7 @@ def load_config() -> Config:
 
             # OpenAI settings
             if "openai" in data:
-                config.openai_api_key = data["openai"].get("api_key")
+                config.openai_api_key = data["openai"].get("api_key", config.openai_api_key)
                 config.openai_model = data["openai"].get("model", config.openai_model)
 
             # Ollama settings
@@ -190,6 +198,7 @@ def save_config(config: Config) -> Path:
     """
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline = Config()  # only settings that differ from the defaults are written
 
     data: dict = {
         "provider": config.provider,
@@ -205,7 +214,7 @@ def save_config(config: Config) -> Path:
         openai_section: dict = {}
         if config.openai_api_key:
             openai_section["api_key"] = config.openai_api_key
-        if config.openai_model != "text-embedding-3-small":
+        if config.openai_model != baseline.openai_model:
             openai_section["model"] = config.openai_model
         if openai_section:
             data["openai"] = openai_section
@@ -213,9 +222,9 @@ def save_config(config: Config) -> Path:
     # Ollama settings
     if config.provider == "ollama":
         ollama_section: dict = {}
-        if config.ollama_url != "http://localhost:11434":
+        if config.ollama_url != baseline.ollama_url:
             ollama_section["url"] = config.ollama_url
-        if config.ollama_model != "nomic-embed-text":
+        if config.ollama_model != baseline.ollama_model:
             ollama_section["model"] = config.ollama_model
         if ollama_section:
             data["ollama"] = ollama_section
@@ -223,9 +232,9 @@ def save_config(config: Config) -> Path:
     # LM Studio settings
     if config.provider == "lmstudio":
         lmstudio_section: dict = {}
-        if config.lmstudio_url != "http://localhost:1234":
+        if config.lmstudio_url != baseline.lmstudio_url:
             lmstudio_section["url"] = config.lmstudio_url
-        if config.lmstudio_model != "text-embedding-nomic-embed-text-v1.5":
+        if config.lmstudio_model != baseline.lmstudio_model:
             lmstudio_section["model"] = config.lmstudio_model
         if lmstudio_section:
             data["lmstudio"] = lmstudio_section

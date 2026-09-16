@@ -13,6 +13,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
 from .config import Config, get_config_path, get_data_dir, load_config, save_config
+from .defaults import DEFAULT_LMSTUDIO_URL, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
 from .embedders import EmbedderConfigError, EmbedderSettings, resolve_embedder_settings
 from .indexer import (
     PROVIDERS,
@@ -110,8 +111,7 @@ def setup():
             config.openai_api_key = api_key
     elif config.provider == "ollama":
         # Ollama setup - check connection first
-        default_ollama_url = "http://localhost:11434"
-        ollama_url = click.prompt("\nOllama API URL", default=default_ollama_url)
+        ollama_url = click.prompt("\nOllama API URL", default=DEFAULT_OLLAMA_URL)
         config.ollama_url = ollama_url
 
         # Verify connection and get available models
@@ -142,17 +142,16 @@ def setup():
                     config.ollama_model = click.prompt("Enter embedding model name")
             else:
                 click.echo(" none found")
-                click.echo("\nNo embedding models detected. Install nomic-embed-text:")
-                click.echo("  ollama pull nomic-embed-text")
-                config.ollama_model = click.prompt("\nEnter embedding model name", default="nomic-embed-text")
+                click.echo(f"\nNo embedding models detected. Install {DEFAULT_OLLAMA_MODEL}:")
+                click.echo(f"  ollama pull {DEFAULT_OLLAMA_MODEL}")
+                config.ollama_model = click.prompt("\nEnter embedding model name", default=DEFAULT_OLLAMA_MODEL)
         else:
             click.echo(" not detected (server may still work)")
             click.echo("Could not auto-detect models.")
-            config.ollama_model = click.prompt("\nEnter embedding model name", default="nomic-embed-text")
+            config.ollama_model = click.prompt("\nEnter embedding model name", default=DEFAULT_OLLAMA_MODEL)
     else:
         # LM Studio setup - check connection after getting URL
-        default_lmstudio_url = "http://localhost:1234"
-        lmstudio_url = click.prompt("\nLM Studio API URL", default=default_lmstudio_url)
+        lmstudio_url = click.prompt("\nLM Studio API URL", default=DEFAULT_LMSTUDIO_URL)
         config.lmstudio_url = lmstudio_url
 
         # Verify connection and get available models

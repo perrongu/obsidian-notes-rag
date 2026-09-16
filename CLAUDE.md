@@ -77,8 +77,9 @@ Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → Vector
 
 ### Key Components (src/obsidian_rag/)
 
+- **defaults.py**: the provider defaults (`DEFAULT_PROVIDER`, `DEFAULT_*_MODEL`, `DEFAULT_*_URL`), a leaf module with no internal imports; every other module reads them from here instead of repeating the literals
 - **config.py**: `Config` dataclass with `get_openai_api_key()` (config → env → Keychain chain), `load_config()`/`save_config()` for TOML
-- **indexer.py**: `VaultIndexer` scans markdown, `OpenAIEmbedder` with retry/truncation/batching, `create_embedder()` factory, `IndexerConfig` with `_make_defaults()` classmethod
+- **indexer.py**: `VaultIndexer` scans markdown, `OpenAIEmbedder` with retry/truncation/batching, `create_embedder()` factory, `IndexerConfig` with `_make_defaults()` classmethod (derived from the dataclass field defaults)
 - **embedders.py**: `resolve_embedder_settings(config, **overrides)` -> frozen `EmbedderSettings` with `.create()`; the single place provider/model/base_url/API key are resolved (CLI, watcher, server). Raises `MissingApiKeyError` for OpenAI without a key
 - **store.py**: `VectorStore` wraps sqlite-vec, two tables (chunks + chunks_vec virtual table), thread-safe, filter column validation via `_ALLOWED_FILTER_COLUMNS`
 - **server.py**: `MCPServer` (mcp 2.x) with 5 tools (`search_notes`, `get_similar`, `get_note_context`, `get_stats`, `reindex`), failures raised as `ToolError` (client sees `is_error=True`), lock-guarded lazy-initialized globals and a single-flight `reindex` (mcp 2.x runs sync tools on worker threads)
@@ -145,6 +146,7 @@ git push origin custom/main
 ## Testing
 
 - `test_store.py` — VectorStore contract tests
+- `test_config.py` — shared provider defaults, `save_config` minimal output, TOML round-trip
 - `test_indexer.py` — frontmatter parsing, chunk_markdown
 - `test_indexer_config.py` — IndexerConfig presets, serialization
 - `test_cli.py` — CLI commands, shared misconfiguration error across embedding commands
