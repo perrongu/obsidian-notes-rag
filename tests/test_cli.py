@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+from obsidian_rag import defaults
 from obsidian_rag.cli import main
 from obsidian_rag.config import Config
 
@@ -145,3 +146,11 @@ class TestEmbedderResolution:
         )
 
         assert captured == {"provider": "ollama", "model": "mxbai", "ollama_url": "http://o:1", "lmstudio_url": None}
+
+
+class TestProviderHelp:
+    def test_help_names_the_shared_default_provider(self) -> None:
+        result = CliRunner().invoke(main, ["--help"])
+
+        assert result.exit_code == 0
+        assert f"(default: {defaults.DEFAULT_PROVIDER})" in result.output
