@@ -19,6 +19,8 @@ Custom modifications vs upstream v1.1.2:
 - Structured logging in server and watcher
 - Safe AppleScript execution via argv passing (`watcher.py`)
 - Permanent error detection to skip non-transient retry loops (`watcher.py`)
+- Retry queue with per-path attempt tracking and exponential backoff, one pass per health cycle (`retry_queue.py`)
+- iCloud dataless-file handling: detect evicted files, request `brctl download`, retry later (`icloud.py`)
 - plistlib-based plist generation (`cli.py`)
 - Filter column validation in store queries (`store.py`)
 - Lazy config loading in watcher (`watcher.py`)
@@ -77,7 +79,9 @@ Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → Vector
 - **indexer.py**: `VaultIndexer` scans markdown, `OpenAIEmbedder` with retry/truncation/batching, `create_embedder()` factory, `IndexerConfig` with `_make_defaults()` classmethod
 - **store.py**: `VectorStore` wraps sqlite-vec, two tables (chunks + chunks_vec virtual table), thread-safe, filter column validation via `_ALLOWED_FILTER_COLUMNS`
 - **server.py**: FastMCP server with 5 tools (`search_notes`, `get_similar`, `get_note_context`, `get_stats`, `reindex`), structured logging, lazy-initialized globals
-- **watcher.py**: `VaultWatcher` with watchdog, debouncing (2s), `RetryQueue`, `_is_permanent_error()` classification, macOS notifications via safe AppleScript
+- **watcher.py**: `VaultWatcher` with watchdog, debouncing (2s), `_is_permanent_error()` classification, macOS notifications via safe AppleScript; `_try_index()` raises, `_index_file()` queues
+- **retry_queue.py**: `RetryQueue` (attempts + backoff per path, `pop_due` snapshot) and `process_due()` (one retry pass, never spins)
+- **icloud.py**: `is_dataless()`, `is_dataless_error()` (EDEADLK), `request_download()` via `brctl`
 - **cli.py**: Click CLI, plistlib-based plist generation, `install-service`/`uninstall-service` commands
 
 ### Chunking
@@ -141,3 +145,6 @@ git push origin custom/main
 - `test_indexer.py` — frontmatter parsing, chunk_markdown
 - `test_indexer_config.py` — IndexerConfig presets, serialization
 - `test_cli.py` — CLI commands
+- `test_retry_queue.py` — RetryQueue backoff, give-up, snapshot semantics
+- `test_icloud.py` — dataless detection, EDEADLK classification, brctl invocation
+- `test_watcher.py` — handler retry behavior, `process_due` never hot-loops
