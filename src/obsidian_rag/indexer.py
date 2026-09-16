@@ -355,7 +355,7 @@ def _truncate_for_embedding(
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
             enc = tiktoken.get_encoding("cl100k_base")
-        tokens = enc.encode(text)
+        tokens = enc.encode(text, disallowed_special=())
         if len(tokens) <= max_tokens:
             return text
         return enc.decode(tokens[:max_tokens])
