@@ -1,10 +1,30 @@
 """Tests for CLI commands."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from obsidian_rag.cli import main
+from obsidian_rag.config import Config
+
+
+@pytest.fixture(autouse=True)
+def isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Config:
+    """Keep CLI tests independent of the machine's real config file and environment.
+
+    The CLI group calls ``load_config()`` on every invocation; without this fixture the
+    tests would read ``~/Library/Application Support/obsidian-notes-rag/config.toml`` and
+    the ``OBSIDIAN_RAG_*`` variables, so they pass or fail depending on the host machine.
+    """
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+    config = Config(vault_path=str(vault_path), data_path=str(tmp_path / "data"))
+    monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
+    for name in ("OBSIDIAN_RAG_VAULT", "OBSIDIAN_RAG_DATA", "OBSIDIAN_RAG_PROVIDER", "OBSIDIAN_RAG_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    return config
 
 
 class TestIndexCommand:

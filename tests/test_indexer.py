@@ -1,6 +1,8 @@
 """Tests for the indexer module."""
 
-from obsidian_rag.indexer import chunk_markdown, parse_frontmatter
+import tiktoken
+
+from obsidian_rag.indexer import _OPENAI_MAX_TOKENS, _truncate_for_embedding, chunk_markdown, parse_frontmatter
 
 
 class TestParseFrontmatter:
@@ -89,3 +91,22 @@ Actual content here."""
         """Empty or whitespace-only content returns no chunks."""
         assert chunk_markdown("", "test.md") == []
         assert chunk_markdown("   \n\n  ", "test.md") == []
+
+
+class TestTruncateForEmbedding:
+    def test_short_text_is_unchanged(self):
+        text = "A short note that fits comfortably under the limit."
+        assert _truncate_for_embedding(text) == text
+
+    def test_long_text_is_cut_to_token_limit(self):
+        enc = tiktoken.encoding_for_model("text-embedding-3-small")
+        text = "word " * (_OPENAI_MAX_TOKENS * 2)
+        truncated = _truncate_for_embedding(text)
+        assert len(enc.encode(truncated)) == _OPENAI_MAX_TOKENS
+        assert text.startswith(truncated)
+
+    def test_custom_limit_uses_model_encoding(self):
+        enc = tiktoken.get_encoding("cl100k_base")
+        text = "alpha beta gamma delta epsilon zeta eta theta"
+        truncated = _truncate_for_embedding(text, max_tokens=3, model="unknown-model")
+        assert enc.encode(truncated) == enc.encode(text)[:3]
