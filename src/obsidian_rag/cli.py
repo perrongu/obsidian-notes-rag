@@ -240,9 +240,11 @@ def _prompt_vault_path() -> str | None:
             return None
 
 
-def _prompt_data_path() -> str:
-    data_path = click.prompt("\nWhere to store the search index?", default=str(get_data_dir()))
-    return os.path.expanduser(data_path)
+def _prompt_data_path() -> str | None:
+    """Ask where to store the index; ``None`` when the default is kept so config.toml does not pin it."""
+    default = str(get_data_dir())
+    data_path = os.path.expanduser(click.prompt("\nWhere to store the search index?", default=default))
+    return None if data_path == default else data_path
 
 
 def _maybe_initial_index(config: Config, vault_path: str) -> None:

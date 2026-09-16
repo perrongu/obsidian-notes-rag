@@ -103,7 +103,7 @@ class TestProviderSelection:
         assert config["provider"] == "openai"
         assert "openai" not in config
         assert config["vault_path"] == str(wizard_env.vault.resolve())
-        assert config["data_path"] == str(wizard_env.data_dir)
+        assert "data_path" not in config  # the default is resolved at run time, never pinned in the file
         assert not wizard_env.plist_path.exists()
 
     def test_openai_keychain_key_is_detected(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
@@ -239,6 +239,20 @@ class TestServiceInstall:
         assert plist["StandardOutPath"] == str(wizard_env.log_dir / "watcher.log")
         assert plist["WorkingDirectory"] == str(wizard_env.data_dir)
         assert f"Logs: {wizard_env.log_dir}/watcher.log" in result.output
+        assert "data_path" not in _config(wizard_env)  # typing the default is the same as accepting it
+
+    def test_custom_data_path_is_saved_and_pinned_in_plist(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        custom = wizard_env.data_dir.parent / "custom-index"
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n{custom}\nn\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert _config(wizard_env)["data_path"] == str(custom)
+        plist = _plist(wizard_env)
+        assert plist["EnvironmentVariables"]["OBSIDIAN_RAG_DATA"] == str(custom)
+        assert plist["WorkingDirectory"] == str(custom)
+        assert custom.is_dir()
 
     @pytest.mark.parametrize(
         ("choice", "provider", "url"),
