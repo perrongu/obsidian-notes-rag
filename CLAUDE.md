@@ -24,6 +24,7 @@ Custom modifications vs upstream v1.1.2:
 - plistlib-based plist generation (`cli.py`)
 - Filter column validation in store queries (`store.py`)
 - Lazy config loading in watcher (`watcher.py`)
+- MCP server on mcp 2.x `MCPServer` (upstream pins `mcp<2`): per-singleton locks for lazy init, single-flight `reindex`, failures raised as `ToolError` (`server.py`)
 
 ## Commands
 
@@ -69,7 +70,7 @@ uv sync --dev
 ```
 Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → VectorStore (sqlite-vec)
                       |               |                                      ↓
-                 chunk_markdown   _truncate_for_embedding          MCP Client ← FastMCP Server
+                 chunk_markdown   _truncate_for_embedding          MCP Client ← MCPServer (mcp 2.x)
                  (Chonkie)        + _call_with_retry
 ```
 
@@ -78,7 +79,7 @@ Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → Vector
 - **config.py**: `Config` dataclass with `get_openai_api_key()` (config → env → Keychain chain), `load_config()`/`save_config()` for TOML
 - **indexer.py**: `VaultIndexer` scans markdown, `OpenAIEmbedder` with retry/truncation/batching, `create_embedder()` factory, `IndexerConfig` with `_make_defaults()` classmethod
 - **store.py**: `VectorStore` wraps sqlite-vec, two tables (chunks + chunks_vec virtual table), thread-safe, filter column validation via `_ALLOWED_FILTER_COLUMNS`
-- **server.py**: FastMCP server with 5 tools (`search_notes`, `get_similar`, `get_note_context`, `get_stats`, `reindex`), structured logging, lazy-initialized globals
+- **server.py**: `MCPServer` (mcp 2.x) with 5 tools (`search_notes`, `get_similar`, `get_note_context`, `get_stats`, `reindex`), failures raised as `ToolError` (client sees `is_error=True`), lock-guarded lazy-initialized globals and a single-flight `reindex` (mcp 2.x runs sync tools on worker threads)
 - **watcher.py**: `VaultWatcher` with watchdog, debouncing (2s), `_is_permanent_error()` classification, macOS notifications via safe AppleScript; `_try_index()` raises, `_index_file()` queues
 - **retry_queue.py**: `RetryQueue` (attempts + backoff per path, `pop_due` snapshot) and `process_due()` (one retry pass, never spins)
 - **icloud.py**: `is_dataless()`, `is_dataless_error()` (EDEADLK), `request_download()` via `brctl`
@@ -134,7 +135,7 @@ git checkout dev
 ```bash
 git fetch upstream
 git log --oneline custom/main..upstream/main   # check what's new
-git merge upstream/main                         # merge, conflicts likely in indexer.py
+git merge upstream/main                         # merge, conflicts likely in indexer.py, server.py, pyproject.toml
 git push origin custom/main
 # then reinstall (see Commands section)
 ```
@@ -145,6 +146,7 @@ git push origin custom/main
 - `test_indexer.py` — frontmatter parsing, chunk_markdown
 - `test_indexer_config.py` — IndexerConfig presets, serialization
 - `test_cli.py` — CLI commands
+- `test_server.py` — MCP tools driven through an in-process client, error results, reindex guard, thread-safe lazy init
 - `test_retry_queue.py` — RetryQueue backoff, give-up, snapshot semantics
 - `test_icloud.py` — dataless detection, EDEADLK classification, brctl invocation
 - `test_watcher.py` — handler retry behavior, `process_due` never hot-loops
