@@ -187,6 +187,27 @@ class TestVaultAndConfigFile:
         assert "Setup cancelled." in result.output
         assert not wizard_env.config_path.exists()
 
+    def test_vault_path_must_be_a_directory(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        note = wizard_env.vault / "note.md"
+
+        result = run_setup(f"1\nn\n{note}\n\n{wizard_env.vault}\n\nn\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert f"Directory not found: {note}" in result.output
+        assert _config(wizard_env)["vault_path"] == str(wizard_env.vault.resolve())
+
+    def test_vault_check_does_not_walk_the_vault(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
+        """An iCloud vault with thousands of evicted files must not be walked just to print a count."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.setattr(Path, "rglob", MagicMock(side_effect=AssertionError("the wizard walked the vault")))
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\nn\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert "✓ Vault found" in result.output
+        assert "markdown files" not in result.output
+
     def test_existing_config_overwrite_declined(self, wizard_env):
         wizard_env.config_path.parent.mkdir(parents=True)
         wizard_env.config_path.write_text('provider = "ollama"\n')

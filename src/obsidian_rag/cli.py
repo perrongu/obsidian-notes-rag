@@ -230,9 +230,9 @@ def _prompt_vault_path() -> str | None:
     """Ask until an existing directory is given; ``None`` when the user gives up."""
     while True:
         vault_path = os.path.expanduser(click.prompt("\nPath to your Obsidian vault"))
-        if Path(vault_path).exists():
-            md_files = list(Path(vault_path).rglob("*.md"))
-            click.echo(f"✓ Vault found ({len(md_files)} markdown files)")
+        if Path(vault_path).is_dir():
+            # No file count here: walking a large iCloud vault is slow and the initial indexing reports it anyway
+            click.echo("✓ Vault found")
             return vault_path
         click.echo(f"✗ Directory not found: {vault_path}")
         if not click.confirm("Try again?", default=True):
