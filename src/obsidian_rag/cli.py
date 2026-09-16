@@ -17,7 +17,13 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
 from .config import Config, get_config_path, get_data_dir, load_config, save_config
-from .defaults import DEFAULT_LMSTUDIO_MODEL, DEFAULT_LMSTUDIO_URL, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
+from .defaults import (
+    DEFAULT_LMSTUDIO_MODEL,
+    DEFAULT_LMSTUDIO_URL,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_URL,
+    DEFAULT_PROVIDER,
+)
 from .embedders import EmbedderConfigError, EmbedderSettings, resolve_embedder_settings
 from .indexer import (
     PROVIDERS,
@@ -48,7 +54,7 @@ def _embedder_settings(ctx: click.Context) -> EmbedderSettings:
     "--provider",
     default=None,
     type=click.Choice(list(PROVIDERS)),
-    help="Embedding provider (default: openai)",
+    help=f"Embedding provider (default: {DEFAULT_PROVIDER})",
 )
 @click.option("--ollama-url", default=None, help="Ollama API URL (only used with --provider ollama)")
 @click.option("--lmstudio-url", default=None, help="LM Studio API URL (only used with --provider lmstudio)")

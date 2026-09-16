@@ -22,6 +22,7 @@ from .defaults import (
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_URL,
     DEFAULT_OPENAI_MODEL,
+    DEFAULT_PROVIDER,
 )
 
 if TYPE_CHECKING:
@@ -568,7 +569,7 @@ def unknown_provider_message(provider: str) -> str:
 
 
 def create_embedder(
-    provider: str = "openai",
+    provider: str = DEFAULT_PROVIDER,
     model: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,

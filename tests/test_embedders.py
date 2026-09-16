@@ -1,10 +1,12 @@
 """Tests for the shared provider -> embedder resolution."""
 
+import inspect
 from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
 
+from obsidian_rag import defaults
 from obsidian_rag.config import Config
 from obsidian_rag.embedders import (
     EmbedderConfigError,
@@ -13,6 +15,7 @@ from obsidian_rag.embedders import (
     UnknownProviderError,
     resolve_embedder_settings,
 )
+from obsidian_rag.indexer import PROVIDERS, create_embedder
 
 OLLAMA = Config(provider="ollama", ollama_url="http://ollama:11434", ollama_model="nomic")
 LMSTUDIO = Config(provider="lmstudio", lmstudio_url="http://lm:1234", lmstudio_model="nomic-v1.5")
@@ -79,3 +82,9 @@ class TestEmbedderSettings:
         settings = EmbedderSettings("ollama", "nomic", "http://ollama:11434", None)
         assert settings.create() == "embedder"
         factory.assert_called_once_with(provider="ollama", model="nomic", base_url="http://ollama:11434", api_key=None)
+
+
+class TestCreateEmbedderDefaultProvider:
+    def test_default_provider_is_the_shared_constant(self) -> None:
+        assert inspect.signature(create_embedder).parameters["provider"].default == defaults.DEFAULT_PROVIDER
+        assert defaults.DEFAULT_PROVIDER in PROVIDERS
