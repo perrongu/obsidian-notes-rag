@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import ParamSpec, TypeVar
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from .config import Config, load_config
 from .indexer import Embedder, VaultIndexer, create_embedder
@@ -16,72 +21,104 @@ logger = logging.getLogger(__name__)
 # Create MCP server
 mcp = MCPServer("obsidian-rag")
 
-# Global instances, lazily initialized. mcp 2.x runs synchronous tools on worker
-# threads, so initialization is guarded by a re-entrant lock (get_embedder and
-# get_store both call get_config while holding it).
-_init_lock = threading.RLock()
+# Shared instances, created on first use. mcp 2.x runs synchronous tools on
+# worker threads, so each instance has its own lock. get_config() never takes
+# another lock, so the store/embedder getters may call it while holding theirs.
+_config_lock = threading.Lock()
+_embedder_lock = threading.Lock()
+_store_lock = threading.Lock()
 _config: Config | None = None
 _embedder: Embedder | None = None
 _store: VectorStore | None = None
+
+# Tool bodies also run concurrently; a second reindex must not clear the store
+# while the first one is still upserting.
+_reindex_lock = threading.Lock()
+
+_REINDEX_BATCH_SIZE = 50
+_SEARCH_CONTENT_CHARS = 500
+_SIMILAR_PREVIEW_CHARS = 200
+_SIMILAR_EMBED_CHARS = 8000
+_SIMILAR_OVERFETCH = 10
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 def get_config() -> Config:
     """Get or create config instance."""
     global _config
-    with _init_lock:
+    with _config_lock:
         if _config is None:
             _config = load_config()
         return _config
 
 
+def _build_embedder(config: Config) -> Embedder:
+    """Create the embedder described by ``config`` (no caching)."""
+    if config.provider == "openai":
+        api_key = config.get_openai_api_key()
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY not set. Configure via environment variable, "
+                "config.toml [openai] api_key, or macOS Keychain."
+            )
+        return create_embedder(provider="openai", model=config.openai_model, base_url=None, api_key=api_key)
+    if config.provider == "ollama":
+        return create_embedder(provider="ollama", model=config.ollama_model, base_url=config.ollama_url, api_key=None)
+    return create_embedder(provider="lmstudio", model=config.lmstudio_model, base_url=config.lmstudio_url, api_key=None)
+
+
 def get_embedder() -> Embedder:
     """Get or create embedder instance."""
     global _embedder
-    with _init_lock:
+    with _embedder_lock:
         if _embedder is None:
-            config = get_config()
-
-            # Resolve API key from config, env, or Keychain
-            resolved_api_key: str | None = None
-            if config.provider == "openai":
-                resolved_api_key = config.get_openai_api_key()
-                if not resolved_api_key:
-                    raise RuntimeError(
-                        "OPENAI_API_KEY not set. Configure via environment variable, "
-                        "config.toml [openai] api_key, or macOS Keychain."
-                    )
-
-            # Determine model and base_url based on provider
-            if config.provider == "openai":
-                model = config.openai_model
-                base_url = None
-            elif config.provider == "ollama":
-                model = config.ollama_model
-                base_url = config.ollama_url
-            else:  # lmstudio
-                model = config.lmstudio_model
-                base_url = config.lmstudio_url
-
-            _embedder = create_embedder(
-                provider=config.provider,
-                model=model,
-                base_url=base_url,
-                api_key=resolved_api_key,
-            )
+            _embedder = _build_embedder(get_config())
         return _embedder
 
 
 def get_store() -> VectorStore:
     """Get or create store instance."""
     global _store
-    with _init_lock:
+    with _store_lock:
         if _store is None:
-            config = get_config()
-            _store = VectorStore(data_path=config.get_data_path())
+            _store = VectorStore(data_path=get_config().get_data_path())
         return _store
 
 
+def _raise_tool_errors(fn: Callable[P, R]) -> Callable[P, R]:
+    """Surface failures to the MCP client as ``is_error`` results.
+
+    ``ToolError`` already carries a client-facing message and is re-raised as is.
+    Any other exception is logged with its traceback and converted to a
+    ``ToolError`` so the message reaches the client instead of the SDK's generic
+    "Error executing tool" text.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as e:
+            logger.exception("%s failed", fn.__name__)
+            raise ToolError(str(e)) from e
+
+    return wrapper
+
+
+def _preview(text: str, max_chars: int) -> str:
+    return text[:max_chars] if len(text) > max_chars else text
+
+
+def _similarity(result: dict) -> float:
+    return round(1 - result["distance"], 3)
+
+
 @mcp.tool()
+@_raise_tool_errors
 def search_notes(query: str, limit: int | None = None, note_type: str | None = None) -> list[dict]:
     """Search notes using semantic similarity.
 
@@ -93,36 +130,33 @@ def search_notes(query: str, limit: int | None = None, note_type: str | None = N
     Returns:
         List of matching notes with content, file path, and similarity score
     """
-    try:
-        config = get_config()
-        embedder = get_embedder()
-        store = get_store()
+    config = get_config()
+    embedder = get_embedder()
+    store = get_store()
 
-        if limit is None:
-            limit = config.indexer.default_search_limit
+    if limit is None:
+        limit = config.indexer.default_search_limit
 
-        query_embedding = embedder.embed(query, task_type="search_query")
-        where = {"type": note_type} if note_type else None
-        results = store.search(query_embedding, limit=limit, where=where)
-        threshold = config.indexer.similarity_threshold
+    query_embedding = embedder.embed(query, task_type="search_query")
+    where = {"type": note_type} if note_type else None
+    results = store.search(query_embedding, limit=limit, where=where)
+    threshold = config.indexer.similarity_threshold
 
-        return [
-            {
-                "file_path": r["metadata"]["file_path"],
-                "heading": r["metadata"].get("heading") or None,
-                "content": r["content"][:500] if len(r["content"]) > 500 else r["content"],
-                "similarity": round(1 - r["distance"], 3),
-                "type": r["metadata"].get("type", "note"),
-            }
-            for r in results
-            if threshold <= 0 or (1 - r["distance"]) >= threshold
-        ]
-    except Exception as e:
-        logger.error("search_notes failed: %s", e)
-        return [{"error": str(e)}]
+    return [
+        {
+            "file_path": r["metadata"]["file_path"],
+            "heading": r["metadata"].get("heading") or None,
+            "content": _preview(r["content"], _SEARCH_CONTENT_CHARS),
+            "similarity": _similarity(r),
+            "type": r["metadata"].get("type", "note"),
+        }
+        for r in results
+        if threshold <= 0 or _similarity(r) >= threshold
+    ]
 
 
 @mcp.tool()
+@_raise_tool_errors
 def get_similar(note_path: str, limit: int | None = None) -> list[dict]:
     """Find notes similar to the given note.
 
@@ -133,39 +167,36 @@ def get_similar(note_path: str, limit: int | None = None) -> list[dict]:
     Returns:
         List of similar notes with content preview and similarity score
     """
-    try:
-        config = get_config()
-        embedder = get_embedder()
-        store = get_store()
+    config = get_config()
+    embedder = get_embedder()
+    store = get_store()
 
-        if limit is None:
-            limit = config.indexer.default_similar_limit
+    if limit is None:
+        limit = config.indexer.default_similar_limit
 
-        results = store.get_by_file(note_path)
-        if not results:
-            return [{"error": f"Note not found: {note_path}"}]
+    results = store.get_by_file(note_path)
+    if not results:
+        raise ToolError(f"Note not found: {note_path}")
 
-        note_content = "\n\n".join(r["content"] for r in results)
-        note_embedding = embedder.embed(note_content[:8000])
-        all_results = store.search(note_embedding, limit=limit + 10)
+    note_content = "\n\n".join(r["content"] for r in results)
+    note_embedding = embedder.embed(note_content[:_SIMILAR_EMBED_CHARS])
+    all_results = store.search(note_embedding, limit=limit + _SIMILAR_OVERFETCH)
 
-        similar = [r for r in all_results if r["metadata"]["file_path"] != note_path][:limit]
+    similar = [r for r in all_results if r["metadata"]["file_path"] != note_path][:limit]
 
-        return [
-            {
-                "file_path": r["metadata"]["file_path"],
-                "heading": r["metadata"].get("heading") or None,
-                "preview": r["content"][:200] if len(r["content"]) > 200 else r["content"],
-                "similarity": round(1 - r["distance"], 3),
-            }
-            for r in similar
-        ]
-    except Exception as e:
-        logger.error("get_similar failed: %s", e)
-        return [{"error": str(e)}]
+    return [
+        {
+            "file_path": r["metadata"]["file_path"],
+            "heading": r["metadata"].get("heading") or None,
+            "preview": _preview(r["content"], _SIMILAR_PREVIEW_CHARS),
+            "similarity": _similarity(r),
+        }
+        for r in similar
+    ]
 
 
 @mcp.tool()
+@_raise_tool_errors
 def get_note_context(note_path: str, limit: int | None = None) -> dict:
     """Get a note and its related context.
 
@@ -176,48 +207,73 @@ def get_note_context(note_path: str, limit: int | None = None) -> dict:
     Returns:
         Note content and list of similar notes for context
     """
-    try:
-        config = get_config()
-        store = get_store()
+    config = get_config()
+    store = get_store()
 
-        if limit is None:
-            limit = config.indexer.default_context_limit
+    if limit is None:
+        limit = config.indexer.default_context_limit
 
-        results = store.get_by_file(note_path)
-        if not results:
-            return {"error": f"Note not found: {note_path}"}
+    results = store.get_by_file(note_path)
+    if not results:
+        raise ToolError(f"Note not found: {note_path}")
 
-        note_content = "\n\n".join(r["content"] for r in results)
-        similar = get_similar(note_path, limit=limit)
+    note_content = "\n\n".join(r["content"] for r in results)
 
-        return {
-            "file_path": note_path,
-            "content": note_content,
-            "similar_notes": similar if not (similar and "error" in similar[0]) else [],
-        }
-    except Exception as e:
-        logger.error("get_note_context failed: %s", e)
-        return {"error": str(e)}
+    return {
+        "file_path": note_path,
+        "content": note_content,
+        "similar_notes": get_similar(note_path, limit=limit),
+    }
 
 
 @mcp.tool()
+@_raise_tool_errors
 def get_stats() -> dict:
     """Get index statistics.
 
     Returns:
         Statistics about the indexed notes collection
     """
-    try:
-        store = get_store()
-        return store.get_stats()
-    except Exception as e:
-        logger.error("get_stats failed: %s", e)
-        return {"error": str(e)}
+    return get_store().get_stats()
+
+
+def _index_files(indexer: VaultIndexer, store: VectorStore, files: list[Path]) -> tuple[int, int, list[dict]]:
+    """Embed and upsert ``files`` in batches. Returns (files_indexed, chunks_created, errors)."""
+    chunk_count = 0
+    file_count = 0
+    errors: list[dict] = []
+    batch_chunks: list = []
+    batch_embeddings: list = []
+
+    for file_path in files:
+        try:
+            for chunk, embedding in indexer.index_file(file_path):
+                batch_chunks.append(chunk)
+                batch_embeddings.append(embedding)
+                chunk_count += 1
+
+                if len(batch_chunks) >= _REINDEX_BATCH_SIZE:
+                    store.upsert_batch(batch_chunks, batch_embeddings)
+                    batch_chunks = []
+                    batch_embeddings = []
+
+            file_count += 1
+        except Exception as e:
+            errors.append({"file": str(file_path), "error": str(e)})
+
+    if batch_chunks:
+        store.upsert_batch(batch_chunks, batch_embeddings)
+
+    return file_count, chunk_count, errors
 
 
 @mcp.tool()
+@_raise_tool_errors
 def reindex(clear: bool = False, path_filter: str | None = None) -> dict:
     """Re-index the Obsidian vault.
+
+    Only one reindex runs at a time; a second call while one is in progress
+    fails immediately instead of clearing the store under the running one.
 
     Args:
         clear: If True, clear existing index before re-indexing (default: False)
@@ -226,14 +282,16 @@ def reindex(clear: bool = False, path_filter: str | None = None) -> dict:
     Returns:
         Statistics about the indexing operation
     """
+    config = get_config()
+    embedder = get_embedder()
+    store = get_store()
+
+    if not config.vault_path:
+        raise ToolError("No vault path configured. Run 'obsidian-rag setup' first.")
+
+    if not _reindex_lock.acquire(blocking=False):
+        raise ToolError("A reindex is already running. Wait for it to finish before starting another.")
     try:
-        config = get_config()
-        embedder = get_embedder()
-        store = get_store()
-
-        if not config.vault_path:
-            return {"error": "No vault path configured. Run 'obsidian-rag setup' first."}
-
         indexer = VaultIndexer(vault_path=config.vault_path, embedder=embedder, config=config.indexer)
 
         if clear:
@@ -243,43 +301,18 @@ def reindex(clear: bool = False, path_filter: str | None = None) -> dict:
         if path_filter:
             files = [f for f in files if str(f.relative_to(indexer.vault_path)).startswith(path_filter)]
 
-        chunk_count = 0
-        file_count = 0
-        errors = []
-        batch_chunks = []
-        batch_embeddings = []
-        batch_size = 50
+        file_count, chunk_count, errors = _index_files(indexer, store, files)
+    finally:
+        _reindex_lock.release()
 
-        for file_path in files:
-            try:
-                for chunk, embedding in indexer.index_file(file_path):
-                    batch_chunks.append(chunk)
-                    batch_embeddings.append(embedding)
-                    chunk_count += 1
-
-                    if len(batch_chunks) >= batch_size:
-                        store.upsert_batch(batch_chunks, batch_embeddings)
-                        batch_chunks = []
-                        batch_embeddings = []
-
-                file_count += 1
-            except Exception as e:
-                errors.append({"file": str(file_path), "error": str(e)})
-
-        if batch_chunks:
-            store.upsert_batch(batch_chunks, batch_embeddings)
-
-        return {
-            "files_indexed": file_count,
-            "chunks_created": chunk_count,
-            "total_in_store": store.get_stats()["count"],
-            "errors": errors if errors else None,
-            "path_filter": path_filter,
-            "cleared": clear,
-        }
-    except Exception as e:
-        logger.error("reindex failed: %s", e)
-        return {"error": str(e)}
+    return {
+        "files_indexed": file_count,
+        "chunks_created": chunk_count,
+        "total_in_store": store.get_stats()["count"],
+        "errors": errors if errors else None,
+        "path_filter": path_filter,
+        "cleared": clear,
+    }
 
 
 def run_server():
