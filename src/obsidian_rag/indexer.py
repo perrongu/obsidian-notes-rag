@@ -8,11 +8,15 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import yaml
 from chonkie import RecursiveChunker
 from chonkie.types.recursive import RecursiveLevel, RecursiveRules
+
+if TYPE_CHECKING:
+    from openai.types import CreateEmbeddingResponse
 
 
 @dataclass
@@ -374,7 +378,7 @@ class OpenAIEmbedder:
         self.client = OpenAI(api_key=api_key) if api_key else OpenAI()
         self.model = model
 
-    def _call_with_retry(self, texts: list[str]) -> list:
+    def _call_with_retry(self, texts: list[str]) -> CreateEmbeddingResponse:
         """Call the embeddings API with exponential backoff on transient errors."""
         import time
 

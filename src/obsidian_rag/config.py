@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,13 +26,9 @@ logger = logging.getLogger(__name__)
 
 def _get_keychain_value(service: str, account: str = APP_NAME) -> str | None:
     """Retrieve a secret from macOS Keychain. Returns None on failure."""
-    import sys
-
     if sys.platform != "darwin":
         return None
     try:
-        import subprocess
-
         result = subprocess.run(
             ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
             capture_output=True,
@@ -48,16 +46,12 @@ def resolve_path_case(path: str) -> str:
     On macOS, the filesystem is case-insensitive but case-preserving.
     Watchdog requires the exact case to detect file changes properly.
     """
-    import sys
-
     p = Path(path).expanduser()
     if not p.exists():
         return path
 
     # On macOS, use the real path which preserves correct case
     if sys.platform == "darwin":
-        import subprocess
-
         try:
             # Use realpath command which returns the canonical path with correct case
             result = subprocess.run(
