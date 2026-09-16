@@ -75,6 +75,14 @@ def resolve_path_case(path: str) -> str:
     return str(p.resolve())
 
 
+# Environment variable overriding each provider's server URL (``Config.<provider>_url``);
+# openai has none. Shared with the launchd plist writer in cli.py so both sides stay in sync.
+PROVIDER_URL_ENV: dict[str, str] = {
+    "ollama": "OBSIDIAN_RAG_OLLAMA_URL",
+    "lmstudio": "OBSIDIAN_RAG_LMSTUDIO_URL",
+}
+
+
 def get_config_dir() -> Path:
     """Get the configuration directory (cross-platform)."""
     return Path(user_config_dir(APP_NAME))
@@ -175,10 +183,9 @@ def load_config() -> Config:
         config.vault_path = resolve_path_case(os.environ["OBSIDIAN_RAG_VAULT"])
     if os.environ.get("OBSIDIAN_RAG_DATA"):
         config.data_path = os.environ["OBSIDIAN_RAG_DATA"]
-    if os.environ.get("OBSIDIAN_RAG_OLLAMA_URL"):
-        config.ollama_url = os.environ["OBSIDIAN_RAG_OLLAMA_URL"]
-    if os.environ.get("OBSIDIAN_RAG_LMSTUDIO_URL"):
-        config.lmstudio_url = os.environ["OBSIDIAN_RAG_LMSTUDIO_URL"]
+    for provider, env_name in PROVIDER_URL_ENV.items():
+        if os.environ.get(env_name):
+            setattr(config, f"{provider}_url", os.environ[env_name])
     if os.environ.get("OBSIDIAN_RAG_MODEL"):
         if config.provider == "ollama":
             config.ollama_model = os.environ["OBSIDIAN_RAG_MODEL"]
