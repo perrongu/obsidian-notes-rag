@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
+import tiktoken
 import yaml
 from chonkie import RecursiveChunker
 from chonkie.types.recursive import RecursiveLevel, RecursiveRules
@@ -345,25 +346,22 @@ def _truncate_for_embedding(
 ) -> str:
     """Truncate text to fit within the model's token limit.
 
-    Uses tiktoken if available (with model-specific encoding); falls back to
-    a conservative 4 chars/token estimate.
+    Every tiktoken token covers at least one UTF-8 byte, so a text that fits in
+    ``max_tokens`` bytes cannot exceed ``max_tokens`` tokens and is returned
+    without tokenizing. With the default chunker (1500 characters, at most 6000
+    bytes) that is every indexed chunk; only long unchunked texts such as whole
+    notes are counted and cut with tiktoken's model-specific encoding.
     """
+    if len(text.encode("utf-8")) <= max_tokens:
+        return text
     try:
-        import tiktoken
-
-        try:
-            enc = tiktoken.encoding_for_model(model)
-        except KeyError:
-            enc = tiktoken.get_encoding("cl100k_base")
-        tokens = enc.encode(text, disallowed_special=())
-        if len(tokens) <= max_tokens:
-            return text
-        return enc.decode(tokens[:max_tokens])
-    except ImportError:
-        char_limit = max_tokens * 4
-        if len(text) <= char_limit:
-            return text
-        return text[:char_limit]
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
+    tokens = enc.encode(text, disallowed_special=())
+    if len(tokens) <= max_tokens:
+        return text
+    return enc.decode(tokens[:max_tokens])
 
 
 class OpenAIEmbedder:

@@ -89,12 +89,12 @@ Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → Vector
 
 ### Chunking
 
-Chonkie RecursiveChunker: 1500 tokens max, 50 chars minimum, splits by heading > paragraph > line > sentence > word. Code blocks preserved. Chunks exceeding 8191 tokens are truncated via tiktoken before embedding.
+Chonkie RecursiveChunker: 1500 tokens max, 50 chars minimum, splits by heading > paragraph > line > sentence > word. Code blocks preserved. Before embedding, texts of at most 8191 UTF-8 bytes are sent as is (every default-size chunk); longer texts are counted with tiktoken and cut at 8191 tokens.
 
 ### Embedding Safety
 
 `OpenAIEmbedder` in indexer.py handles:
-1. Token truncation to 8191 via `_truncate_for_embedding()` (tiktoken with cl100k_base fallback)
+1. Token truncation to 8191 via `_truncate_for_embedding()`: byte-length short-circuit first, then tiktoken (model encoding, cl100k_base if unknown)
 2. Retry with exponential backoff (1s, 4s, 16s) on rate limits, timeouts, 5xx errors
 3. Sub-batching at 100 texts per API call to stay under OpenAI's 300k token/request limit
 
