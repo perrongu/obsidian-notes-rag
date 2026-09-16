@@ -20,7 +20,7 @@ ollama pull nomic-embed-text
 src/obsidian_rag/
 ├── __init__.py      # Package version
 ├── cli.py           # Click CLI commands
-├── server.py        # MCP server (FastMCP)
+├── server.py        # MCP server (mcp 2.x MCPServer)
 ├── indexer.py       # Markdown parsing, chunking, Ollama embeddings
 ├── store.py         # ChromaDB vector store wrapper
 └── watcher.py       # File watcher daemon (watchdog)
@@ -38,7 +38,7 @@ src/obsidian_rag/
 
 ### MCP Server
 
-The server exposes 5 tools via FastMCP:
+The server exposes 5 tools via `MCPServer` (mcp 2.x). Tool failures are raised as `ToolError` so clients receive `is_error=True` with the message:
 - `search_notes` - Semantic search
 - `get_similar` - Find similar notes
 - `get_note_context` - Note + related context
