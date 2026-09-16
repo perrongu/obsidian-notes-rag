@@ -560,6 +560,14 @@ def get_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
 
 Embedder = OpenAIEmbedder | OllamaEmbedder | LMStudioEmbedder
 
+PROVIDERS = ("openai", "ollama", "lmstudio")
+
+
+def unknown_provider_message(provider: str) -> str:
+    """Error text shared by every place that validates a provider name."""
+    allowed = ", ".join(f"'{p}'" for p in PROVIDERS)
+    return f"Unknown provider: {provider}. Use {allowed}."
+
 
 def create_embedder(
     provider: str = "openai",
@@ -590,7 +598,7 @@ def create_embedder(
             kwargs["base_url"] = base_url
         return LMStudioEmbedder(**kwargs)
     else:
-        raise ValueError(f"Unknown provider: {provider}. Use 'openai', 'ollama', or 'lmstudio'.")
+        raise ValueError(unknown_provider_message(provider))
 
 
 class VaultIndexer:

@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import Config
-from .indexer import Embedder, create_embedder
-
-_PROVIDERS = ("openai", "ollama", "lmstudio")
+from .indexer import PROVIDERS, Embedder, create_embedder, unknown_provider_message
 
 MISSING_API_KEY_MESSAGE = (
     "OPENAI_API_KEY not set. Configure via environment variable, config.toml [openai] api_key, or macOS Keychain."
 )
 
 
-class MissingApiKeyError(RuntimeError):
-    """Raised when the OpenAI provider is selected but no API key can be resolved."""
+class EmbedderConfigError(ValueError):
+    """The embedder cannot be built from the current configuration."""
+
+
+class UnknownProviderError(EmbedderConfigError):
+    """The configured provider name is not one of PROVIDERS."""
+
+
+class MissingApiKeyError(EmbedderConfigError):
+    """The OpenAI provider is selected but no API key can be resolved."""
 
 
 @dataclass(frozen=True)
@@ -25,7 +31,7 @@ class EmbedderSettings:
     provider: str
     model: str | None
     base_url: str | None
-    api_key: str | None
+    api_key: str | None = field(repr=False)
 
     def create(self) -> Embedder:
         """Instantiate the embedder described by these settings."""
@@ -46,12 +52,12 @@ def resolve_embedder_settings(
     values for the selected provider. ``config`` is never mutated.
 
     Raises:
-        ValueError: unknown provider.
+        UnknownProviderError: provider is not one of PROVIDERS.
         MissingApiKeyError: OpenAI selected but no key in config, environment or Keychain.
     """
     resolved_provider = provider or config.provider
-    if resolved_provider not in _PROVIDERS:
-        raise ValueError(f"Unknown provider: {resolved_provider}. Use 'openai', 'ollama', or 'lmstudio'.")
+    if resolved_provider not in PROVIDERS:
+        raise UnknownProviderError(unknown_provider_message(resolved_provider))
 
     defaults = {
         "openai": (config.openai_model, None),

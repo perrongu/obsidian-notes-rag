@@ -7,9 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from obsidian_rag.config import Config
+from obsidian_rag.embedders import EmbedderSettings
 from obsidian_rag.icloud import FileNotMaterializedError
 from obsidian_rag.retry_queue import RetryQueue, process_due
-from obsidian_rag.watcher import NoteEventHandler
+from obsidian_rag.watcher import NoteEventHandler, VaultWatcher, run_watcher
 
 
 @pytest.fixture
@@ -151,3 +153,52 @@ class TestProcessDue:
 
         assert queue.is_empty()
         assert index_fn.call_count == 1
+
+
+@pytest.fixture
+def watcher_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
+    """Isolate VaultWatcher construction: config, store, embedder factory and Ollama health check."""
+    config = Config(
+        vault_path=str(tmp_path), data_path=str(tmp_path / "data"), provider="ollama", ollama_url="http://o:1"
+    )
+    factory = MagicMock(return_value=MagicMock(name="embedder"))
+    health = MagicMock(return_value=True)
+    monkeypatch.setattr("obsidian_rag.watcher._get_config", lambda: config)
+    monkeypatch.setattr("obsidian_rag.watcher.VectorStore", MagicMock())
+    monkeypatch.setattr("obsidian_rag.watcher.check_ollama_health", health)
+    monkeypatch.setattr("obsidian_rag.embedders.create_embedder", factory)
+    return {"config": config, "factory": factory, "health": health}
+
+
+class TestVaultWatcherInit:
+    def test_uses_the_settings_it_is_given(self, watcher_env: dict):
+        settings = EmbedderSettings("ollama", "mxbai", "http://override:2", None)
+
+        watcher = VaultWatcher(settings=settings)
+
+        assert watcher.provider == "ollama"
+        assert watcher.ollama_url == "http://override:2"
+        watcher_env["health"].assert_called_once_with("http://override:2")
+        watcher_env["factory"].assert_called_once_with(
+            provider="ollama", model="mxbai", base_url="http://override:2", api_key=None
+        )
+
+    def test_resolves_from_config_when_no_settings_given(self, watcher_env: dict):
+        watcher = VaultWatcher()
+
+        assert watcher.settings == EmbedderSettings("ollama", "nomic-embed-text", "http://o:1", None)
+        assert watcher.embedder is watcher_env["factory"].return_value
+
+
+class TestRunWatcherMisconfiguration:
+    def test_missing_key_exits_without_traceback(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog):
+        config = Config(vault_path=str(tmp_path), provider="openai")
+        monkeypatch.setattr("obsidian_rag.watcher._get_config", lambda: config)
+        monkeypatch.setattr("obsidian_rag.watcher._setup_logging", lambda: None)
+        monkeypatch.setattr("obsidian_rag.watcher.setproctitle.setproctitle", lambda *_: None)
+
+        with pytest.raises(SystemExit) as exc:
+            run_watcher()
+
+        assert exc.value.code == 1
+        assert "OPENAI_API_KEY not set" in caplog.text

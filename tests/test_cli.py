@@ -1,5 +1,6 @@
 """Tests for CLI commands."""
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -110,13 +111,38 @@ class TestContextCommand:
 
 
 class TestEmbedderResolution:
-    def test_missing_openai_key_exits_with_clear_error(self, isolated_config, monkeypatch: pytest.MonkeyPatch):
-        """Every embedding command shares one resolution path with one readable error."""
-        isolated_config.openai_api_key = None
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.setattr("obsidian_rag.config._get_keychain_value", lambda *_: None)
+    EMBEDDING_COMMANDS = [["index"], ["search", "anything"], ["similar", "n.md"], ["context", "n.md"], ["watch"]]
 
-        result = CliRunner().invoke(main, ["search", "anything"])
+    @pytest.mark.parametrize("args", EMBEDDING_COMMANDS, ids=lambda a: a[0])
+    def test_missing_openai_key_exits_with_clear_error(self, isolated_config, monkeypatch, args):
+        """Every embedding command shares one resolution path and one readable error."""
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: replace(isolated_config, openai_api_key=None))
+
+        result = CliRunner().invoke(main, args)
 
         assert result.exit_code == 1
-        assert "OPENAI_API_KEY not set" in result.output
+        assert "Error: OPENAI_API_KEY not set" in result.output
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize("args", EMBEDDING_COMMANDS, ids=lambda a: a[0])
+    def test_unknown_provider_from_config_exits_with_clear_error(self, isolated_config, monkeypatch, args):
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: replace(isolated_config, provider="weird"))
+
+        result = CliRunner().invoke(main, args)
+
+        assert result.exit_code == 1
+        assert "Error: Unknown provider: weird" in result.output
+
+    def test_cli_overrides_reach_the_resolver(self, monkeypatch):
+        captured = {}
+
+        def fake_resolve(config, **overrides):
+            captured.update(overrides)
+            raise SystemExit(0)
+
+        monkeypatch.setattr("obsidian_rag.cli.resolve_embedder_settings", fake_resolve)
+        CliRunner().invoke(
+            main, ["--provider", "ollama", "--model", "mxbai", "--ollama-url", "http://o:1", "search", "q"]
+        )
+
+        assert captured == {"provider": "ollama", "model": "mxbai", "ollama_url": "http://o:1", "lmstudio_url": None}

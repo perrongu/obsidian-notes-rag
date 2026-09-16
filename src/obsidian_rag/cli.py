@@ -13,8 +13,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
 from .config import Config, get_config_path, get_data_dir, load_config, save_config
-from .embedders import EmbedderSettings, MissingApiKeyError, resolve_embedder_settings
+from .embedders import EmbedderConfigError, EmbedderSettings, resolve_embedder_settings
 from .indexer import (
+    PROVIDERS,
     VaultIndexer,
     get_lmstudio_models,
     get_ollama_models,
@@ -27,18 +28,11 @@ from .watcher import VaultWatcher
 
 
 def _embedder_settings(ctx: click.Context) -> EmbedderSettings:
-    """Resolve the embedder from config plus the global CLI overrides; exit cleanly if misconfigured."""
+    """Resolve the embedder from config plus the global CLI overrides; fail with a one-line error if misconfigured."""
     try:
-        return resolve_embedder_settings(
-            ctx.obj["config"],
-            provider=ctx.obj["provider"],
-            model=ctx.obj["model"],
-            ollama_url=ctx.obj["ollama_url"],
-            lmstudio_url=ctx.obj["lmstudio_url"],
-        )
-    except (MissingApiKeyError, ValueError) as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+        return resolve_embedder_settings(ctx.obj["config"], **ctx.obj["overrides"])
+    except EmbedderConfigError as e:
+        raise click.ClickException(str(e)) from e
 
 
 @click.group()
@@ -47,7 +41,7 @@ def _embedder_settings(ctx: click.Context) -> EmbedderSettings:
 @click.option(
     "--provider",
     default=None,
-    type=click.Choice(["openai", "ollama", "lmstudio"]),
+    type=click.Choice(list(PROVIDERS)),
     help="Embedding provider (default: openai)",
 )
 @click.option("--ollama-url", default=None, help="Ollama API URL (only used with --provider ollama)")
@@ -63,10 +57,13 @@ def main(ctx, vault, data, provider, ollama_url, lmstudio_url, model):
 
     ctx.obj["vault"] = vault or config.vault_path or ""
     ctx.obj["data"] = data or config.get_data_path()
-    ctx.obj["provider"] = provider or config.provider
-    ctx.obj["ollama_url"] = ollama_url or config.ollama_url
-    ctx.obj["lmstudio_url"] = lmstudio_url or config.lmstudio_url
-    ctx.obj["model"] = model  # None means use provider default
+    # Raw CLI overrides (None when absent); precedence over config is applied once, in resolve_embedder_settings
+    ctx.obj["overrides"] = {
+        "provider": provider,
+        "model": model,
+        "ollama_url": ollama_url,
+        "lmstudio_url": lmstudio_url,
+    }
     ctx.obj["config"] = config
 
 
@@ -540,26 +537,16 @@ def watch(ctx, debounce):
         click.echo("Error: No vault path configured. Run 'obsidian-rag setup' first.", err=True)
         sys.exit(1)
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
-    model = ctx.obj["model"]
+    settings = _embedder_settings(ctx)
 
     click.echo(f"Watching vault: {vault_path}")
     click.echo(f"Data path: {data_path}")
-    click.echo(f"Provider: {provider}")
+    click.echo(f"Provider: {settings.provider}")
+    click.echo(f"Model: {settings.model}")
     click.echo(f"Debounce: {debounce}s")
     click.echo("Press Ctrl+C to stop.\n")
 
-    watcher = VaultWatcher(
-        vault_path=vault_path,
-        data_path=data_path,
-        provider=provider,
-        ollama_url=ollama_url,
-        lmstudio_url=lmstudio_url,
-        model=model,
-        debounce_delay=debounce,
-    )
+    watcher = VaultWatcher(vault_path=vault_path, data_path=data_path, settings=settings, debounce_delay=debounce)
     watcher.run_forever()
 
 
@@ -650,9 +637,11 @@ def install_service(ctx):
 
     vault_path = ctx.obj["vault"]
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    model = ctx.obj["model"]
+    settings = _embedder_settings(ctx)  # validates the provider and API key before installing the service
+    provider = settings.provider
+    ollama_url = settings.base_url or ctx.obj["config"].ollama_url
+    # Only an explicit --model is pinned in the plist; otherwise the service follows config.toml
+    model = ctx.obj["overrides"]["model"]
 
     plist_path = LAUNCH_AGENTS_DIR / PLIST_NAME
 

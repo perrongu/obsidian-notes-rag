@@ -147,7 +147,8 @@ git push origin custom/main
 - `test_store.py` — VectorStore contract tests
 - `test_indexer.py` — frontmatter parsing, chunk_markdown
 - `test_indexer_config.py` — IndexerConfig presets, serialization
-- `test_cli.py` — CLI commands
+- `test_cli.py` — CLI commands, shared misconfiguration error across embedding commands
+- `test_embedders.py` — provider -> embedder resolution, overrides, typed config errors
 - `test_server.py` — MCP tools driven through an in-process client, error results, reindex guard, thread-safe lazy init
 - `test_retry_queue.py` — RetryQueue backoff, give-up, snapshot semantics
 - `test_icloud.py` — dataless detection, EDEADLK classification, brctl invocation
