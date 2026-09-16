@@ -264,7 +264,7 @@ class TestEmbedderResolution:
         assert result.exit_code == 0, result.output
         assert wizard_env.plist_path.exists()
         assert len(resolve_calls) == 1
-        assert len(keychain_reads) == 2  # once to detect the key in _prompt_openai, once to resolve the embedder
+        assert len(keychain_reads) == 1  # _prompt_openai's detection; the resolution reuses that key
 
     def test_embedder_config_error_is_reported_in_one_line(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
@@ -274,13 +274,15 @@ class TestEmbedderResolution:
 
         monkeypatch.setattr("obsidian_rag.cli.resolve_embedder_settings", failing_resolve)
 
-        result = run_setup(f"1\nn\n{wizard_env.vault}\n\ny\n\n")
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\n")
 
-        assert result.exit_code == 1
+        assert result.exit_code == 0, result.output
         assert "Configuration saved" in result.output
-        assert "Error: bad embedder configuration" in result.output
+        assert "✗ bad embedder configuration" in result.output
         assert "Traceback" not in result.output
+        assert "Run initial indexing now?" not in result.output  # both optional steps are skipped, not attempted
         assert not wizard_env.plist_path.exists()
+        assert "Setup complete!" in result.output  # the saved configuration is still usable once fixed
 
 
 class TestServiceInstall:
@@ -304,6 +306,17 @@ class TestServiceInstall:
         assert plist["WorkingDirectory"] == str(wizard_env.data_dir)
         assert f"Logs: {wizard_env.log_dir}/watcher.log" in result.output
         assert "data_path" not in _config(wizard_env)  # typing the default is the same as accepting it
+
+    def test_accepting_a_relative_default_does_not_pin_it(self, wizard_env, monkeypatch, tmp_path: Path):
+        """platformdirs honours a relative XDG_DATA_HOME verbatim; the comparison must normalize both sides."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.setattr("obsidian_rag.cli.get_data_dir", lambda: Path("rel-data"))
+        monkeypatch.chdir(tmp_path)
+
+        result = run_setup(f"1\nn\n{wizard_env.vault}\n\nn\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert "data_path" not in _config(wizard_env)
 
     def test_custom_data_path_is_saved_and_pinned_in_plist(self, wizard_env, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
@@ -403,15 +416,17 @@ class TestServiceInstall:
         assert plist["WorkingDirectory"] == str(tmp_path / expected)
         assert (tmp_path / expected).is_dir()
 
-    def test_install_service_writes_absolute_path_for_vault_option(self, wizard_env, monkeypatch, tmp_path: Path):
+    def test_install_service_writes_canonical_path_for_vault_option(self, wizard_env, monkeypatch, tmp_path: Path):
+        """--vault gets the same realpath treatment as config.toml: watchdog needs the canonical root."""
         config = Config(data_path=str(wizard_env.data_dir), openai_api_key="k")
         monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
         monkeypatch.chdir(tmp_path)
+        (tmp_path / "link").symlink_to(wizard_env.vault)
 
-        result = CliRunner().invoke(main, ["--vault", "vault", "install-service"])
+        result = CliRunner().invoke(main, ["--vault", "link", "install-service"])
 
         assert result.exit_code == 0, result.output
-        assert _plist(wizard_env)["EnvironmentVariables"]["OBSIDIAN_RAG_VAULT"] == str(tmp_path / "vault")
+        assert _plist(wizard_env)["EnvironmentVariables"]["OBSIDIAN_RAG_VAULT"] == str(wizard_env.vault.resolve())
 
     def test_install_service_command_pins_lmstudio_url_under_its_own_key(self, wizard_env, monkeypatch):
         config = Config(vault_path=str(wizard_env.vault), data_path=str(wizard_env.data_dir))

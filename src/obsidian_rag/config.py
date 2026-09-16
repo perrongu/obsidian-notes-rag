@@ -63,10 +63,12 @@ def resolve_path_case(path: str) -> str:
 
     On macOS, the filesystem is case-insensitive but case-preserving.
     Watchdog requires the exact case to detect file changes properly.
+    The result is always absolute: a path that does not exist yet (vault not
+    mounted) is only expanded and anchored, never returned as typed.
     """
-    p = Path(path).expanduser()
+    p = Path(absolute_path(path))
     if not p.exists():
-        return path
+        return str(p)
 
     # On macOS, use the real path which preserves correct case
     if sys.platform == "darwin":
@@ -226,7 +228,7 @@ def save_config(config: Config) -> Path:
     if config.vault_path:
         data["vault_path"] = resolve_path_case(config.vault_path)
     if config.data_path:
-        data["data_path"] = config.data_path
+        data["data_path"] = absolute_path(config.data_path)
 
     # OpenAI settings
     if config.provider == "openai" or config.openai_api_key:
