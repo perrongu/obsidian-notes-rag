@@ -81,8 +81,12 @@ class TestToolRegistration:
         assert schema["required"] == ["query"]
         assert set(schema["properties"]) == {"query", "limit", "note_type"}
 
-    def test_optional_parameters_have_concrete_types(self):
-        """Claude Code rejects omitted ``anyOf [T, null]`` parameters, so every optional must be ``{type, default}``."""
+    def test_optional_parameters_have_concrete_types_and_no_default(self):
+        """Every optional parameter publishes a bare ``{type}``: no ``anyOf`` and no ``default``.
+
+        See the ``_NO_SCHEMA_DEFAULT`` comment in server.py for the Claude Desktop proxy behavior
+        this guards against.
+        """
         for name, tool in _list_tools().items():
             schema = tool.input_schema
             for prop_name, prop in schema["properties"].items():
@@ -90,7 +94,7 @@ class TestToolRegistration:
                     continue
                 assert "anyOf" not in prop, f"{name}.{prop_name} is nullable"
                 assert "type" in prop, f"{name}.{prop_name} has no concrete type"
-                assert prop.get("default") is not None, f"{name}.{prop_name} defaults to null"
+                assert "default" not in prop, f"{name}.{prop_name} publishes a default"
 
     def test_server_advertises_package_version(self):
         assert obsidian_rag.__version__ != ""
@@ -266,6 +270,21 @@ class TestGetNoteContext:
         store.search.assert_not_called()
 
 
+@pytest.fixture
+def indexed_vault(monkeypatch: pytest.MonkeyPatch, tmp_path) -> MagicMock:
+    """A one-note vault wired to a fake embedder and store; returns the store mock."""
+    (tmp_path / "note.md").write_text("# Title\n\nbody")
+    embedder = MagicMock()
+    embedder.embed_batch.return_value = [[0.1]]
+    embedder.embed.return_value = [0.1]
+    store = MagicMock()
+    store.get_stats.return_value = {"count": 1}
+    monkeypatch.setattr(server, "_config", Config(vault_path=str(tmp_path)))
+    monkeypatch.setattr(server, "_embedder", embedder)
+    monkeypatch.setattr(server, "_store", store)
+    return store
+
+
 class TestReindex:
     def test_requires_vault_path(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(server, "_config", Config(vault_path=None))
@@ -293,16 +312,8 @@ class TestReindex:
         assert "already running" in _text(result)
         store.clear.assert_not_called()
 
-    def test_indexes_files_and_releases_lock(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
-        (tmp_path / "note.md").write_text("# Title\n\nbody")
-        embedder = MagicMock()
-        embedder.embed_batch.return_value = [[0.1]]
-        embedder.embed.return_value = [0.1]
-        store = MagicMock()
-        store.get_stats.return_value = {"count": 1}
-        monkeypatch.setattr(server, "_config", Config(vault_path=str(tmp_path)))
-        monkeypatch.setattr(server, "_embedder", embedder)
-        monkeypatch.setattr(server, "_store", store)
+    def test_indexes_files_and_releases_lock(self, indexed_vault: MagicMock):
+        store = indexed_vault
 
         result = _call_tool("reindex", {"clear": True})
 
@@ -314,21 +325,18 @@ class TestReindex:
         assert payload["path_filter"] is None
         store.clear.assert_called_once()
 
-    def test_explicit_null_path_filter_indexes_whole_vault(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
-        (tmp_path / "note.md").write_text("# Title\n\nbody")
-        embedder = MagicMock()
-        embedder.embed_batch.return_value = [[0.1]]
-        embedder.embed.return_value = [0.1]
-        store = MagicMock()
-        store.get_stats.return_value = {"count": 1}
-        monkeypatch.setattr(server, "_config", Config(vault_path=str(tmp_path)))
-        monkeypatch.setattr(server, "_embedder", embedder)
-        monkeypatch.setattr(server, "_store", store)
-
-        result = _call_tool("reindex", {"path_filter": None})
+    @pytest.mark.parametrize("arguments", [{}, {"clear": None, "path_filter": None}], ids=["omitted", "null"])
+    def test_omitted_or_null_arguments_index_whole_vault_without_clearing(
+        self, indexed_vault: MagicMock, arguments: dict
+    ):
+        result = _call_tool("reindex", arguments)
 
         assert result.is_error is False
-        assert _json_content(result)["files_indexed"] == 1
+        payload = _json_content(result)
+        assert payload["files_indexed"] == 1
+        assert payload["cleared"] is False
+        assert payload["path_filter"] is None
+        indexed_vault.clear.assert_not_called()
         assert server._reindex_lock.acquire(blocking=False)
         server._reindex_lock.release()
 
