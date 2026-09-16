@@ -11,7 +11,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from pathlib import Path
 
 import setproctitle
@@ -25,13 +24,15 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
+from . import icloud
 from .config import load_config
 from .indexer import Embedder, IndexerConfig, VaultIndexer, create_embedder
+from .retry_queue import MAX_RETRIES, RETRY_BASE_DELAY, RetryQueue, process_due
 from .store import VectorStore
 
-# Retry configuration
-MAX_RETRIES = 3
 HEALTH_CHECK_INTERVAL = 60  # seconds
+
+__all__ = ["MAX_RETRIES", "RETRY_BASE_DELAY", "RetryQueue", "VaultWatcher", "NoteEventHandler"]
 
 # Lazy-loaded config — avoids module-level side effects (subprocess calls, file I/O)
 _config = None
@@ -76,45 +77,9 @@ def send_notification(title: str, message: str):
         pass  # Notifications are best-effort
 
 
-class RetryQueue:
-    """Queue for files that failed to index."""
-
-    def __init__(self, max_retries: int = MAX_RETRIES):
-        self.max_retries = max_retries
-        self._queue: deque[tuple[Path, int]] = deque()
-        self._lock = threading.Lock()
-
-    def add(self, path: Path):
-        """Add a file to the retry queue."""
-        with self._lock:
-            # Check if already in queue
-            for queued_path, _ in self._queue:
-                if queued_path == path:
-                    return
-            self._queue.append((path, 0))
-            logger.info("Added to retry queue: %s", path)
-
-    def get_next(self) -> tuple[Path, int] | None:
-        """Get the next file to retry, if any."""
-        with self._lock:
-            if not self._queue:
-                return None
-            return self._queue.popleft()
-
-    def requeue(self, path: Path, attempts: int):
-        """Re-add a file with incremented attempt count."""
-        with self._lock:
-            if attempts < self.max_retries:
-                self._queue.append((path, attempts + 1))
-                logger.info("Re-queued %s (attempt %d/%d)", path, attempts + 1, self.max_retries)
-            else:
-                logger.error("Max retries exceeded for %s", path)
-                send_notification("Obsidian RAG Error", f"Failed to index: {path.name}")
-
-    def is_empty(self) -> bool:
-        """Check if the queue is empty."""
-        with self._lock:
-            return len(self._queue) == 0
+def _notify_index_failure(path: Path):
+    """Notify the user that a file was abandoned after repeated indexing failures."""
+    send_notification("Obsidian RAG Error", f"Failed to index: {path.name}")
 
 
 class DebouncedHandler:
@@ -242,30 +207,44 @@ class NoteEventHandler(FileSystemEventHandler):
         return False
 
     def _index_file(self, path: Path):
-        """Index or re-index a single file."""
-        if self._should_ignore(path):
-            return
-
-        if not path.exists():
-            return
-
-        rel_path = self._get_relative_path(path)
-        logger.info("Indexing: %s", rel_path)
-
+        """Index a file from a filesystem event; failures are queued for retry, never raised."""
         try:
-            self.store.delete_by_file(rel_path)
-
-            results = self.indexer.index_file(path)
-            if results:
-                chunks, embeddings = zip(*results, strict=False)
-                self.store.upsert_batch(list(chunks), list(embeddings))
-                logger.info("Indexed %d chunks from %s", len(chunks), rel_path)
+            self._try_index(path)
         except Exception as e:
+            rel_path = self._get_relative_path(path)
             logger.error("Error indexing %s: %s", rel_path, e)
             if self._is_permanent_error(e):
                 logger.warning("Permanent error for %s, skipping retry", rel_path)
-            elif self.retry_queue:
-                self.retry_queue.add(path)
+            elif self.retry_queue is not None:
+                self.retry_queue.add(path, now=time.monotonic())
+        else:
+            if self.retry_queue is not None:
+                self.retry_queue.discard(path)
+
+    def _try_index(self, path: Path):
+        """Index or re-index a single file, raising on failure (used by the retry loop)."""
+        if self._should_ignore(path) or not path.exists():
+            return
+
+        rel_path = self._get_relative_path(path)
+        if icloud.is_dataless(path):
+            logger.info("File not downloaded from iCloud yet, requesting: %s", rel_path)
+            icloud.request_download(path)
+            raise icloud.FileNotMaterializedError(path)
+
+        logger.info("Indexing: %s", rel_path)
+        try:
+            self.store.delete_by_file(rel_path)
+            results = self.indexer.index_file(path)
+        except Exception as e:
+            if icloud.is_dataless_error(e):
+                icloud.request_download(path)
+            raise
+
+        if results:
+            chunks, embeddings = zip(*results, strict=False)
+            self.store.upsert_batch(list(chunks), list(embeddings))
+            logger.info("Indexed %d chunks from %s", len(chunks), rel_path)
 
     def _delete_file(self, path: Path):
         """Remove a file from the index."""
@@ -397,7 +376,11 @@ class VaultWatcher:
         self.embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=resolved_api_key)
         self.store = VectorStore(data_path=data_path)
         self.debounce_delay = debounce_delay
-        self.retry_queue = RetryQueue()
+        self.retry_queue = RetryQueue(
+            max_retries=MAX_RETRIES,
+            base_delay=RETRY_BASE_DELAY,
+            on_give_up=_notify_index_failure,
+        )
 
         self._observer: BaseObserver | None = None
         self._handler: NoteEventHandler | None = None
@@ -428,19 +411,14 @@ class VaultWatcher:
                 send_notification("Obsidian RAG", "Ollama is not responding")
                 continue
 
-            # Process retry queue
-            while not self.retry_queue.is_empty():
-                item = self.retry_queue.get_next()
-                if item is None:
-                    break
-
-                path, attempts = item
-                try:
-                    if self._handler:
-                        self._handler._index_file(path)
-                except Exception as e:
-                    logger.error("Retry failed for %s: %s", path, e)
-                    self.retry_queue.requeue(path, attempts)
+            # Process retry queue: each due file is tried at most once per cycle
+            if self._handler:
+                process_due(
+                    self.retry_queue,
+                    self._handler._try_index,
+                    NoteEventHandler._is_permanent_error,
+                    now=time.monotonic(),
+                )
 
     def start(self):
         """Start watching the vault."""
