@@ -4,7 +4,11 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -13,10 +17,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
 from .config import Config, get_config_path, get_data_dir, load_config, save_config
-from .defaults import DEFAULT_LMSTUDIO_URL, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
+from .defaults import DEFAULT_LMSTUDIO_MODEL, DEFAULT_LMSTUDIO_URL, DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
 from .embedders import EmbedderConfigError, EmbedderSettings, resolve_embedder_settings
 from .indexer import (
     PROVIDERS,
+    Chunk,
     VaultIndexer,
     get_lmstudio_models,
     get_ollama_models,
@@ -68,237 +73,235 @@ def main(ctx, vault, data, provider, ollama_url, lmstudio_url, model):
     ctx.obj["config"] = config
 
 
-@main.command()
-def setup():
-    """Interactive setup wizard for obsidian-notes-rag."""
-    click.echo("\nWelcome to Obsidian RAG setup!\n")
+PROVIDER_LABELS: dict[str, str] = {
+    "openai": "OpenAI (recommended - requires API key)",
+    "ollama": "Ollama (local, offline)",
+    "lmstudio": "LM Studio (local, offline)",
+}
 
-    # Check for existing config
+_INDEX_BATCH_SIZE = 50
+
+
+def _iter_chunks(indexer: VaultIndexer, files: list[Path]) -> Iterator[tuple[Chunk, list[float]]]:
+    """Yield (chunk, embedding) for every file behind a progress bar; a failing file is reported and skipped."""
+    with click.progressbar(files, label="Indexing") as bar:
+        for file_path in bar:
+            try:
+                yield from indexer.index_file(file_path)
+            except Exception as e:
+                click.echo(f"\nError indexing {file_path}: {e}", err=True)
+
+
+def _index_with_progress(indexer: VaultIndexer, store: VectorStore, files: list[Path]) -> int:
+    """Embed and upsert ``files`` in batches; returns the number of chunks stored."""
+    chunk_count = 0
+    batch_chunks: list[Chunk] = []
+    batch_embeddings: list[list[float]] = []
+    for chunk, embedding in _iter_chunks(indexer, files):
+        batch_chunks.append(chunk)
+        batch_embeddings.append(embedding)
+        chunk_count += 1
+        if len(batch_chunks) >= _INDEX_BATCH_SIZE:
+            store.upsert_batch(batch_chunks, batch_embeddings)
+            batch_chunks, batch_embeddings = [], []
+    if batch_chunks:
+        store.upsert_batch(batch_chunks, batch_embeddings)
+    return chunk_count
+
+
+def _confirm_overwrite_existing_config() -> bool:
     config_path = get_config_path()
-    if config_path.exists():
-        if not click.confirm(f"Config already exists at {config_path}. Overwrite?"):
-            click.echo("Setup cancelled.")
-            return
+    if config_path.exists() and not click.confirm(f"Config already exists at {config_path}. Overwrite?"):
+        click.echo("Setup cancelled.")
+        return False
+    return True
 
-    config = Config()
 
-    # 1. Select provider
+def _prompt_provider() -> str:
     click.echo("Select embedding provider:")
-    click.echo("  1. OpenAI (recommended - requires API key)")
-    click.echo("  2. Ollama (local, offline)")
-    click.echo("  3. LM Studio (local, offline)")
-    provider_choice = click.prompt("Choice", type=click.Choice(["1", "2", "3"]), default="1")
-    if provider_choice == "1":
-        config.provider = "openai"
-    elif provider_choice == "2":
-        config.provider = "ollama"
+    for number, provider in enumerate(PROVIDERS, 1):
+        click.echo(f"  {number}. {PROVIDER_LABELS[provider]}")
+    choices = [str(number) for number in range(1, len(PROVIDERS) + 1)]
+    choice = click.prompt("Choice", type=click.Choice(choices), default="1")
+    return PROVIDERS[int(choice) - 1]
+
+
+def _prompt_openai() -> dict[str, str | None]:
+    """Config fields for OpenAI: the key is only stored when the user asks for it."""
+    existing_key = Config().get_openai_api_key()  # environment, then macOS Keychain
+    if existing_key:
+        click.echo("\n✓ Found OPENAI_API_KEY (environment or Keychain)")
+        keep = click.confirm("Save API key to config file?", default=False)
+        return {"openai_api_key": existing_key if keep else None}
+    click.echo("\nNo OPENAI_API_KEY found in environment or Keychain.")
+    return {"openai_api_key": click.prompt("Enter your OpenAI API key", hide_input=True)}
+
+
+def _choose_model(models: list[str], other_label: str, other_prompt: str) -> str:
+    """Numbered menu over ``models`` plus an "Other" entry that asks for a free-form name."""
+    click.echo("\nSelect embedding model:")
+    for number, model in enumerate(models, 1):
+        click.echo(f"  {number}. {model}")
+    click.echo(f"  {len(models) + 1}. {other_label}")
+
+    choices = [str(number) for number in range(1, len(models) + 2)]
+    index = int(click.prompt("Choice", type=click.Choice(choices), default="1")) - 1
+    return models[index] if index < len(models) else click.prompt(other_prompt)
+
+
+@dataclass(frozen=True)
+class _LocalProvider:
+    """How the wizard talks to a locally hosted embedding server."""
+
+    name: str
+    url_field: str
+    model_field: str
+    default_url: str
+    default_model: str
+    is_running: Callable[[str], bool]
+    list_models: Callable[[str], list[str]]
+    model_noun: str
+    install_hint: tuple[str, ...] = ()
+
+
+# The probes are looked up at call time so tests can replace them on the module.
+_OLLAMA = _LocalProvider(
+    name="Ollama",
+    url_field="ollama_url",
+    model_field="ollama_model",
+    default_url=DEFAULT_OLLAMA_URL,
+    default_model=DEFAULT_OLLAMA_MODEL,
+    is_running=lambda url: is_ollama_running(url),
+    list_models=lambda url: get_ollama_models(url),
+    model_noun="model name",
+    install_hint=(f"Install {DEFAULT_OLLAMA_MODEL}:", f"  ollama pull {DEFAULT_OLLAMA_MODEL}"),
+)
+_LMSTUDIO = _LocalProvider(
+    name="LM Studio",
+    url_field="lmstudio_url",
+    model_field="lmstudio_model",
+    default_url=DEFAULT_LMSTUDIO_URL,
+    default_model=DEFAULT_LMSTUDIO_MODEL,
+    is_running=lambda url: is_lmstudio_running(url),
+    list_models=lambda url: get_lmstudio_models(url),
+    model_noun="model identifier",
+)
+
+
+def _prompt_local_provider(spec: _LocalProvider) -> dict[str, str]:
+    """Ask for the server URL and the embedding model; returns the Config fields for ``spec``."""
+    url = click.prompt(f"\n{spec.name} API URL", default=spec.default_url)
+    model_prompt = f"\nEnter embedding {spec.model_noun}"
+
+    click.echo(f"Checking {spec.name} server...", nl=False)
+    if not spec.is_running(url):
+        click.echo(" not detected (server may still work)")
+        click.echo("Could not auto-detect models.")
+        return {spec.url_field: url, spec.model_field: click.prompt(model_prompt, default=spec.default_model)}
+
+    click.echo(" ✓ connected")
+    click.echo("Fetching available embedding models...", nl=False)
+    models = spec.list_models(url)
+    if models:
+        click.echo(f" found {len(models)}")
+        model = _choose_model(models, f"Other (enter {spec.model_noun})", model_prompt)
     else:
-        config.provider = "lmstudio"
+        click.echo(" none found")
+        for line in ("\nNo embedding models detected.", *spec.install_hint):
+            click.echo(line)
+        model = click.prompt(model_prompt, default=spec.default_model)
+    return {spec.url_field: url, spec.model_field: model}
 
-    # 2. Provider-specific setup
-    if config.provider == "openai":
-        # Check for existing API key
-        existing_key = os.environ.get("OPENAI_API_KEY")
-        if existing_key:
-            click.echo("\n✓ Found OPENAI_API_KEY in environment")
-            if not click.confirm("Save API key to config file?", default=False):
-                config.openai_api_key = None
-            else:
-                config.openai_api_key = existing_key
-        else:
-            click.echo("\nNo OPENAI_API_KEY found in environment.")
-            api_key = click.prompt("Enter your OpenAI API key", hide_input=True)
-            config.openai_api_key = api_key
-    elif config.provider == "ollama":
-        # Ollama setup - check connection first
-        ollama_url = click.prompt("\nOllama API URL", default=DEFAULT_OLLAMA_URL)
-        config.ollama_url = ollama_url
 
-        # Verify connection and get available models
-        click.echo("Checking Ollama server...", nl=False)
-        server_running = is_ollama_running(ollama_url)
+_PROVIDER_PROMPTS: dict[str, Callable[[], dict[str, Any]]] = {
+    "openai": _prompt_openai,
+    "ollama": partial(_prompt_local_provider, _OLLAMA),
+    "lmstudio": partial(_prompt_local_provider, _LMSTUDIO),
+}
 
-        if server_running:
-            click.echo(" ✓ connected")
 
-            # Fetch available embedding models
-            click.echo("Fetching available embedding models...", nl=False)
-            available_models = get_ollama_models(ollama_url)
-
-            if available_models:
-                click.echo(f" found {len(available_models)}")
-                click.echo("\nSelect embedding model:")
-                for i, model in enumerate(available_models, 1):
-                    click.echo(f"  {i}. {model}")
-                click.echo(f"  {len(available_models) + 1}. Other (enter model name)")
-
-                choices = [str(i) for i in range(1, len(available_models) + 2)]
-                model_choice = click.prompt("Choice", type=click.Choice(choices), default="1")
-                choice_idx = int(model_choice) - 1
-
-                if choice_idx < len(available_models):
-                    config.ollama_model = available_models[choice_idx]
-                else:
-                    config.ollama_model = click.prompt("Enter embedding model name")
-            else:
-                click.echo(" none found")
-                click.echo(f"\nNo embedding models detected. Install {DEFAULT_OLLAMA_MODEL}:")
-                click.echo(f"  ollama pull {DEFAULT_OLLAMA_MODEL}")
-                config.ollama_model = click.prompt("\nEnter embedding model name", default=DEFAULT_OLLAMA_MODEL)
-        else:
-            click.echo(" not detected (server may still work)")
-            click.echo("Could not auto-detect models.")
-            config.ollama_model = click.prompt("\nEnter embedding model name", default=DEFAULT_OLLAMA_MODEL)
-    else:
-        # LM Studio setup - check connection after getting URL
-        lmstudio_url = click.prompt("\nLM Studio API URL", default=DEFAULT_LMSTUDIO_URL)
-        config.lmstudio_url = lmstudio_url
-
-        # Verify connection and get available models
-        click.echo("Checking LM Studio server...", nl=False)
-        server_running = is_lmstudio_running(lmstudio_url)
-
-        if server_running:
-            click.echo(" ✓ connected")
-
-            # Fetch available embedding models
-            click.echo("Fetching available embedding models...", nl=False)
-            available_models = get_lmstudio_models(lmstudio_url)
-
-            if available_models:
-                click.echo(f" found {len(available_models)}")
-                click.echo("\nSelect embedding model:")
-                for i, model in enumerate(available_models, 1):
-                    click.echo(f"  {i}. {model}")
-                click.echo(f"  {len(available_models) + 1}. Other (enter model identifier)")
-
-                choices = [str(i) for i in range(1, len(available_models) + 2)]
-                model_choice = click.prompt("Choice", type=click.Choice(choices), default="1")
-                choice_idx = int(model_choice) - 1
-
-                if choice_idx < len(available_models):
-                    config.lmstudio_model = available_models[choice_idx]
-                else:
-                    config.lmstudio_model = click.prompt("Enter embedding model identifier")
-            else:
-                click.echo(" none found")
-                click.echo("\nNo embedding models detected.")
-                config.lmstudio_model = click.prompt("Enter embedding model identifier")
-        else:
-            click.echo(" not detected (server may still work)")
-            click.echo("Could not auto-detect models.")
-            config.lmstudio_model = click.prompt("Enter embedding model identifier")
-
-    # 3. Vault path
+def _prompt_vault_path() -> str | None:
+    """Ask until an existing directory is given; ``None`` when the user gives up."""
     while True:
-        vault_path = click.prompt("\nPath to your Obsidian vault")
-        vault_path = os.path.expanduser(vault_path)
+        vault_path = os.path.expanduser(click.prompt("\nPath to your Obsidian vault"))
         if Path(vault_path).exists():
             md_files = list(Path(vault_path).rglob("*.md"))
             click.echo(f"✓ Vault found ({len(md_files)} markdown files)")
-            config.vault_path = vault_path
-            break
-        else:
-            click.echo(f"✗ Directory not found: {vault_path}")
-            if not click.confirm("Try again?", default=True):
-                click.echo("Setup cancelled.")
-                return
+            return vault_path
+        click.echo(f"✗ Directory not found: {vault_path}")
+        if not click.confirm("Try again?", default=True):
+            click.echo("Setup cancelled.")
+            return None
 
-    # 4. Data directory
-    default_data = str(get_data_dir())
-    data_path = click.prompt("\nWhere to store the search index?", default=default_data)
-    data_path = os.path.expanduser(data_path)
-    config.data_path = data_path
 
-    # 5. Save config
-    saved_path = save_config(config)
-    click.echo(f"\n✓ Configuration saved to {saved_path}")
+def _prompt_data_path() -> str:
+    data_path = click.prompt("\nWhere to store the search index?", default=str(get_data_dir()))
+    return os.path.expanduser(data_path)
 
-    # 6. Offer to run initial index
-    if click.confirm("\nRun initial indexing now?", default=True):
-        click.echo("\nIndexing vault...")
-        try:
-            embedder = resolve_embedder_settings(config).create()
 
-            store = VectorStore(data_path=config.get_data_path())
-            indexer = VaultIndexer(vault_path=config.vault_path, embedder=embedder, config=config.indexer)
+def _maybe_initial_index(config: Config, vault_path: str) -> None:
+    if not click.confirm("\nRun initial indexing now?", default=True):
+        return
+    click.echo("\nIndexing vault...")
+    try:
+        embedder = resolve_embedder_settings(config).create()
+        store = VectorStore(data_path=config.get_data_path())
+        indexer = VaultIndexer(vault_path=vault_path, embedder=embedder, config=config.indexer)
+        files = list(indexer.iter_markdown_files())
+        chunk_count = _index_with_progress(indexer, store, files)
+        embedder.close()
+        click.echo(f"\n✓ Indexed {chunk_count} chunks from {len(files)} files")
+    except Exception as e:
+        click.echo(f"\n✗ Indexing failed: {e}", err=True)
+        click.echo("You can run indexing later with: obsidian-notes-rag index")
 
-            files = list(indexer.iter_markdown_files())
-            chunk_count = 0
-            batch_chunks = []
-            batch_embeddings = []
-            batch_size = 50
 
-            with click.progressbar(files, label="Indexing") as bar:
-                for file_path in bar:
-                    try:
-                        for chunk, embedding in indexer.index_file(file_path):
-                            batch_chunks.append(chunk)
-                            batch_embeddings.append(embedding)
-                            chunk_count += 1
-
-                            if len(batch_chunks) >= batch_size:
-                                store.upsert_batch(batch_chunks, batch_embeddings)
-                                batch_chunks = []
-                                batch_embeddings = []
-                    except Exception as e:
-                        click.echo(f"\n  Error: {file_path}: {e}", err=True)
-
-            if batch_chunks:
-                store.upsert_batch(batch_chunks, batch_embeddings)
-
-            embedder.close()
-            click.echo(f"\n✓ Indexed {chunk_count} chunks from {len(files)} files")
-
-        except Exception as e:
-            click.echo(f"\n✗ Indexing failed: {e}", err=True)
-            click.echo("You can run indexing later with: obsidian-notes-rag index")
-
-    # 7. Offer to install watcher service
+def _maybe_install_service(config: Config, vault_path: str) -> None:
     click.echo("\nThe watcher service auto-indexes notes when they change.")
-    if sys.platform == "darwin":
-        if click.confirm("Install watcher as a background service?", default=True):
-            try:
-                plist_path = LAUNCH_AGENTS_DIR / PLIST_NAME
-                LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-
-                # Unload existing service if present
-                if plist_path.exists():
-                    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
-
-                # Install wrapper script (shows descriptive name in System Settings)
-                _install_wrapper_script()
-
-                # Write plist with config values
-                assert config.vault_path is not None  # Set in step 3
-                plist_content = _get_plist_content(
-                    config.vault_path,
-                    config.data_path or str(get_data_dir()),
-                    config.provider,
-                    config.ollama_url,
-                    None,  # model
-                )
-                plist_path.write_text(plist_content)
-
-                # Load service
-                result = subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True, text=True)
-                if result.returncode != 0:
-                    click.echo(f"✗ Error starting service: {result.stderr}", err=True)
-                else:
-                    click.echo("✓ Watcher service installed and started")
-                    click.echo("  Logs: /tmp/obsidian-notes-rag.log")
-            except Exception as e:
-                click.echo(f"✗ Service installation failed: {e}", err=True)
-                click.echo("  You can install later with: obsidian-notes-rag install-service")
-    else:
+    if sys.platform != "darwin":
         # Linux/Windows: no background service support yet
         click.echo("  Background service not yet supported on this platform.")
         click.echo("  To auto-index on file changes, run: obsidian-notes-rag watch")
+        return
+    if not click.confirm("Install watcher as a background service?", default=True):
+        return
+    try:
+        _install_watcher_service(vault_path, config.get_data_path(), config.provider, config.ollama_url)
+    except ServiceInstallError as e:
+        click.echo(f"✗ Error starting service: {e}", err=True)
+    except Exception as e:
+        click.echo(f"✗ Service installation failed: {e}", err=True)
+        click.echo("  You can install later with: obsidian-notes-rag install-service")
+    else:
+        click.echo("✓ Watcher service installed and started")
+        click.echo(f"  Logs: {LOG_DIR}/watcher.log")
 
+
+def _print_next_steps() -> None:
     click.echo("\nSetup complete! You can now:")
     click.echo('  - Search: obsidian-notes-rag search "your query"')
     click.echo("  - Add to Claude Code:")
     click.echo("      claude mcp add -s user obsidian-notes-rag -- uvx obsidian-notes-rag serve")
+
+
+@main.command()
+def setup():
+    """Interactive setup wizard for obsidian-notes-rag."""
+    click.echo("\nWelcome to Obsidian RAG setup!\n")
+    if not _confirm_overwrite_existing_config():
+        return
+
+    provider = _prompt_provider()
+    provider_fields = _PROVIDER_PROMPTS[provider]()
+    vault_path = _prompt_vault_path()
+    if vault_path is None:
+        return
+    config = Config(provider=provider, vault_path=vault_path, data_path=_prompt_data_path(), **provider_fields)
+
+    click.echo(f"\n✓ Configuration saved to {save_config(config)}")
+    _maybe_initial_index(config, vault_path)
+    _maybe_install_service(config, vault_path)
+    _print_next_steps()
 
 
 @main.command()
@@ -337,32 +340,7 @@ def index(ctx, clear, path_filter):
         files = [f for f in files if str(f.relative_to(indexer.vault_path)).startswith(path_filter)]
         click.echo(f"Filtered to {len(files)} files matching '{path_filter}'")
 
-    # Index with progress
-    chunk_count = 0
-    batch_chunks = []
-    batch_embeddings = []
-    batch_size = 50
-
-    with click.progressbar(files, label="Indexing") as bar:
-        for file_path in bar:
-            try:
-                for chunk, embedding in indexer.index_file(file_path):
-                    batch_chunks.append(chunk)
-                    batch_embeddings.append(embedding)
-                    chunk_count += 1
-
-                    # Batch insert
-                    if len(batch_chunks) >= batch_size:
-                        store.upsert_batch(batch_chunks, batch_embeddings)
-                        batch_chunks = []
-                        batch_embeddings = []
-
-            except Exception as e:
-                click.echo(f"\nError indexing {file_path}: {e}", err=True)
-
-    # Insert remaining
-    if batch_chunks:
-        store.upsert_batch(batch_chunks, batch_embeddings)
+    chunk_count = _index_with_progress(indexer, store, files)
 
     embedder.close()
 
@@ -558,7 +536,8 @@ def serve():
 # Service management
 # TODO: Add Linux systemd support (create .service file in ~/.config/systemd/user/)
 # TODO: Add Windows Task Scheduler support (use schtasks or win32api)
-PLIST_NAME = "com.obsidian-notes-rag.watcher.plist"
+SERVICE_LABEL = "com.obsidian-notes-rag.watcher"
+PLIST_NAME = f"{SERVICE_LABEL}.plist"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 WRAPPER_SCRIPT_DIR = Path.home() / ".local" / "bin"
 WRAPPER_SCRIPT_NAME = "obsidian-notes-rag-watcher"
@@ -594,6 +573,53 @@ def _uninstall_wrapper_script():
         wrapper_path.unlink()
 
 
+class ServiceInstallError(RuntimeError):
+    """launchctl refused to load the watcher plist; the message is launchctl's stderr."""
+
+
+def _launchctl(action: str, target: str | Path) -> subprocess.CompletedProcess[str]:
+    """Run ``launchctl <action> <target>``; the single seam tests replace with a fake."""
+    return subprocess.run(["launchctl", action, str(target)], capture_output=True, text=True)
+
+
+def _plist_path() -> Path:
+    return LAUNCH_AGENTS_DIR / PLIST_NAME
+
+
+def _install_watcher_service(
+    vault_path: str,
+    data_path: str,
+    provider: str,
+    ollama_url: str,
+    model: str | None = None,  # None: the service follows config.toml; only an explicit --model is pinned
+    *,
+    echo: Callable[[str], None] = lambda _message: None,
+) -> Path:
+    """Write the wrapper script and plist, (re)load the launchd service and return the plist path.
+
+    ``echo`` receives progress lines; ``install-service`` prints them, ``setup`` stays quiet.
+    """
+    plist_path = _plist_path()
+    try:
+        LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)  # launchd does not create StandardOutPath's directory
+        # The wrapper script shows a descriptive name in System Settings > Login Items. It is
+        # written before the running service is unloaded so a write failure leaves it running.
+        echo(f"Created: {_install_wrapper_script()}")
+        if plist_path.exists():
+            echo("Unloading existing service...")
+            _launchctl("unload", plist_path)
+        plist_path.write_text(_get_plist_content(vault_path, data_path, provider, ollama_url, model))
+    except OSError as e:
+        raise ServiceInstallError(f"could not write the service files: {e}") from e
+    echo(f"Created: {plist_path}")
+
+    result = _launchctl("load", plist_path)
+    if result.returncode != 0:
+        raise ServiceInstallError(result.stderr)
+    return plist_path
+
+
 def _get_plist_content(vault_path: str, data_path: str, provider: str, ollama_url: str, model: str | None) -> str:
     """Generate launchd plist content using plistlib (safe XML escaping)."""
     import plistlib
@@ -611,7 +637,7 @@ def _get_plist_content(vault_path: str, data_path: str, provider: str, ollama_ur
         env_vars["OBSIDIAN_RAG_MODEL"] = model
 
     plist_dict: dict = {
-        "Label": "com.obsidian-notes-rag.watcher",
+        "Label": SERVICE_LABEL,
         "ProgramArguments": [str(wrapper_path)],
         "EnvironmentVariables": env_vars,
         "RunAtLoad": True,
@@ -642,30 +668,10 @@ def install_service(ctx):
     # Only an explicit --model is pinned in the plist; otherwise the service follows config.toml
     model = ctx.obj["overrides"]["model"]
 
-    plist_path = LAUNCH_AGENTS_DIR / PLIST_NAME
-
-    # Create directories if needed
-    LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Unload existing service if present
-    if plist_path.exists():
-        click.echo("Unloading existing service...")
-        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
-
-    # Install wrapper script (shows descriptive name in System Settings)
-    wrapper_path = _install_wrapper_script()
-    click.echo(f"Created: {wrapper_path}")
-
-    # Write plist
-    plist_content = _get_plist_content(vault_path, data_path, provider, ollama_url, model)
-    plist_path.write_text(plist_content)
-    click.echo(f"Created: {plist_path}")
-
-    # Load service
-    result = subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True, text=True)
-    if result.returncode != 0:
-        click.echo(f"Error loading service: {result.stderr}", err=True)
+    try:
+        _install_watcher_service(vault_path, data_path, provider, ollama_url, model, echo=click.echo)
+    except ServiceInstallError as e:
+        click.echo(f"Error loading service: {e}", err=True)
         sys.exit(1)
 
     click.echo("Service installed and started.")
@@ -681,14 +687,13 @@ def uninstall_service():
         click.echo("Error: This command currently only supports macOS. Linux/Windows support planned.", err=True)
         sys.exit(1)
 
-    plist_path = LAUNCH_AGENTS_DIR / PLIST_NAME
+    plist_path = _plist_path()
 
     if not plist_path.exists():
         click.echo("Service not installed.")
         return
 
-    # Unload service
-    result = subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True, text=True)
+    result = _launchctl("unload", plist_path)
     if result.returncode != 0:
         click.echo(f"Warning: Error unloading service: {result.stderr}", err=True)
 
@@ -709,17 +714,11 @@ def service_status():
         click.echo("Error: This command currently only supports macOS. Linux/Windows support planned.", err=True)
         sys.exit(1)
 
-    plist_path = LAUNCH_AGENTS_DIR / PLIST_NAME
-
-    if not plist_path.exists():
+    if not _plist_path().exists():
         click.echo("Service not installed.")
         return
 
-    result = subprocess.run(
-        ["launchctl", "list", "com.obsidian-notes-rag.watcher"],
-        capture_output=True,
-        text=True,
-    )
+    result = _launchctl("list", SERVICE_LABEL)
 
     if result.returncode == 0:
         click.echo("Service is running.")

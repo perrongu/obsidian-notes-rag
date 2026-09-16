@@ -86,7 +86,7 @@ Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → Vector
 - **watcher.py**: `VaultWatcher` with watchdog, debouncing (2s), `_is_permanent_error()` classification, macOS notifications via safe AppleScript; `_try_index()` raises, `_index_file()` queues
 - **retry_queue.py**: `RetryQueue` (attempts + backoff per path, `pop_due` snapshot) and `process_due()` (one retry pass, never spins)
 - **icloud.py**: `is_dataless()`, `is_dataless_error()` (EDEADLK), `request_download()` via `brctl`
-- **cli.py**: Click CLI, plistlib-based plist generation, `install-service`/`uninstall-service` commands
+- **cli.py**: Click CLI, plistlib-based plist generation, `_install_watcher_service()` shared by `setup` and `install-service` (`launchctl load`/`unload` go through `_launchctl()`, the seam tests replace), `setup` wizard split into `_prompt_*` helpers with the provider menu driven by `PROVIDERS`
 
 ### Chunking
 
@@ -150,6 +150,7 @@ git push origin custom/main
 - `test_indexer.py` — frontmatter parsing, chunk_markdown
 - `test_indexer_config.py` — IndexerConfig presets, serialization
 - `test_cli.py` — CLI commands, shared misconfiguration error across embedding commands
+- `test_cli_setup.py` — `setup` wizard driven through `CliRunner` input, watcher-service install with a fake `launchctl`, every path redirected to `tmp_path`
 - `test_embedders.py` — provider -> embedder resolution, overrides, typed config errors
 - `test_server.py` — MCP tools driven through an in-process client, error results, reindex guard, thread-safe lazy init
 - `test_retry_queue.py` — RetryQueue backoff, give-up, snapshot semantics
