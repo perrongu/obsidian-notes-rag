@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .config import Config, load_config
 from .indexer import Embedder, VaultIndexer, create_embedder
@@ -13,9 +14,12 @@ from .store import VectorStore
 logger = logging.getLogger(__name__)
 
 # Create MCP server
-mcp = FastMCP("obsidian-rag")
+mcp = MCPServer("obsidian-rag")
 
-# Global instances (lazy initialized — server runs single-threaded via stdio)
+# Global instances, lazily initialized. mcp 2.x runs synchronous tools on worker
+# threads, so initialization is guarded by a re-entrant lock (get_embedder and
+# get_store both call get_config while holding it).
+_init_lock = threading.RLock()
 _config: Config | None = None
 _embedder: Embedder | None = None
 _store: VectorStore | None = None
@@ -24,54 +28,57 @@ _store: VectorStore | None = None
 def get_config() -> Config:
     """Get or create config instance."""
     global _config
-    if _config is None:
-        _config = load_config()
-    return _config
+    with _init_lock:
+        if _config is None:
+            _config = load_config()
+        return _config
 
 
 def get_embedder() -> Embedder:
     """Get or create embedder instance."""
     global _embedder
-    if _embedder is None:
-        config = get_config()
+    with _init_lock:
+        if _embedder is None:
+            config = get_config()
 
-        # Resolve API key from config, env, or Keychain
-        resolved_api_key: str | None = None
-        if config.provider == "openai":
-            resolved_api_key = config.get_openai_api_key()
-            if not resolved_api_key:
-                raise RuntimeError(
-                    "OPENAI_API_KEY not set. Configure via environment variable, "
-                    "config.toml [openai] api_key, or macOS Keychain."
-                )
+            # Resolve API key from config, env, or Keychain
+            resolved_api_key: str | None = None
+            if config.provider == "openai":
+                resolved_api_key = config.get_openai_api_key()
+                if not resolved_api_key:
+                    raise RuntimeError(
+                        "OPENAI_API_KEY not set. Configure via environment variable, "
+                        "config.toml [openai] api_key, or macOS Keychain."
+                    )
 
-        # Determine model and base_url based on provider
-        if config.provider == "openai":
-            model = config.openai_model
-            base_url = None
-        elif config.provider == "ollama":
-            model = config.ollama_model
-            base_url = config.ollama_url
-        else:  # lmstudio
-            model = config.lmstudio_model
-            base_url = config.lmstudio_url
+            # Determine model and base_url based on provider
+            if config.provider == "openai":
+                model = config.openai_model
+                base_url = None
+            elif config.provider == "ollama":
+                model = config.ollama_model
+                base_url = config.ollama_url
+            else:  # lmstudio
+                model = config.lmstudio_model
+                base_url = config.lmstudio_url
 
-        _embedder = create_embedder(
-            provider=config.provider,
-            model=model,
-            base_url=base_url,
-            api_key=resolved_api_key,
-        )
-    return _embedder
+            _embedder = create_embedder(
+                provider=config.provider,
+                model=model,
+                base_url=base_url,
+                api_key=resolved_api_key,
+            )
+        return _embedder
 
 
 def get_store() -> VectorStore:
     """Get or create store instance."""
     global _store
-    if _store is None:
-        config = get_config()
-        _store = VectorStore(data_path=config.get_data_path())
-    return _store
+    with _init_lock:
+        if _store is None:
+            config = get_config()
+            _store = VectorStore(data_path=config.get_data_path())
+        return _store
 
 
 @mcp.tool()

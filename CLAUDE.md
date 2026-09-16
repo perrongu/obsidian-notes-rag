@@ -69,7 +69,7 @@ uv sync --dev
 ```
 Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → VectorStore (sqlite-vec)
                       |               |                                      ↓
-                 chunk_markdown   _truncate_for_embedding          MCP Client ← FastMCP Server
+                 chunk_markdown   _truncate_for_embedding          MCP Client ← MCPServer (mcp 2.x)
                  (Chonkie)        + _call_with_retry
 ```
 
@@ -78,7 +78,7 @@ Obsidian Vault → VaultIndexer → Embedder (OpenAI/Ollama/LMStudio) → Vector
 - **config.py**: `Config` dataclass with `get_openai_api_key()` (config → env → Keychain chain), `load_config()`/`save_config()` for TOML
 - **indexer.py**: `VaultIndexer` scans markdown, `OpenAIEmbedder` with retry/truncation/batching, `create_embedder()` factory, `IndexerConfig` with `_make_defaults()` classmethod
 - **store.py**: `VectorStore` wraps sqlite-vec, two tables (chunks + chunks_vec virtual table), thread-safe, filter column validation via `_ALLOWED_FILTER_COLUMNS`
-- **server.py**: FastMCP server with 5 tools (`search_notes`, `get_similar`, `get_note_context`, `get_stats`, `reindex`), structured logging, lazy-initialized globals
+- **server.py**: `MCPServer` (mcp 2.x) with 5 tools (`search_notes`, `get_similar`, `get_note_context`, `get_stats`, `reindex`), structured logging, lock-guarded lazy-initialized globals (tools run on worker threads)
 - **watcher.py**: `VaultWatcher` with watchdog, debouncing (2s), `_is_permanent_error()` classification, macOS notifications via safe AppleScript; `_try_index()` raises, `_index_file()` queues
 - **retry_queue.py**: `RetryQueue` (attempts + backoff per path, `pop_due` snapshot) and `process_due()` (one retry pass, never spins)
 - **icloud.py**: `is_dataless()`, `is_dataless_error()` (EDEADLK), `request_download()` via `brctl`
