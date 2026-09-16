@@ -16,7 +16,7 @@ import click
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-from .config import Config, get_config_path, get_data_dir, load_config, save_config
+from .config import PROVIDER_URL_ENV, Config, get_config_path, get_data_dir, load_config, save_config
 from .defaults import (
     DEFAULT_LMSTUDIO_MODEL,
     DEFAULT_LMSTUDIO_URL,
@@ -272,7 +272,8 @@ def _maybe_install_service(config: Config, vault_path: str) -> None:
     if not click.confirm("Install watcher as a background service?", default=True):
         return
     try:
-        _install_watcher_service(vault_path, config.get_data_path(), config.provider, config.ollama_url)
+        settings = resolve_embedder_settings(config)
+        _install_watcher_service(vault_path, config.get_data_path(), settings.provider, settings.base_url)
     except ServiceInstallError as e:
         click.echo(f"✗ Error starting service: {e}", err=True)
     except Exception as e:
@@ -596,7 +597,7 @@ def _install_watcher_service(
     vault_path: str,
     data_path: str,
     provider: str,
-    ollama_url: str,
+    base_url: str | None,  # the chosen provider's server URL; None for providers without one (openai)
     model: str | None = None,  # None: the service follows config.toml; only an explicit --model is pinned
     *,
     echo: Callable[[str], None] = lambda _message: None,
@@ -609,13 +610,14 @@ def _install_watcher_service(
     try:
         LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
         LOG_DIR.mkdir(parents=True, exist_ok=True)  # launchd does not create StandardOutPath's directory
+        Path(data_path).mkdir(parents=True, exist_ok=True)  # WorkingDirectory must exist before launchd chdirs
         # The wrapper script shows a descriptive name in System Settings > Login Items. It is
         # written before the running service is unloaded so a write failure leaves it running.
         echo(f"Created: {_install_wrapper_script()}")
         if plist_path.exists():
             echo("Unloading existing service...")
             _launchctl("unload", plist_path)
-        plist_path.write_text(_get_plist_content(vault_path, data_path, provider, ollama_url, model))
+        plist_path.write_text(_get_plist_content(vault_path, data_path, provider, base_url, model))
     except OSError as e:
         raise ServiceInstallError(f"could not write the service files: {e}") from e
     echo(f"Created: {plist_path}")
@@ -626,7 +628,7 @@ def _install_watcher_service(
     return plist_path
 
 
-def _get_plist_content(vault_path: str, data_path: str, provider: str, ollama_url: str, model: str | None) -> str:
+def _get_plist_content(vault_path: str, data_path: str, provider: str, base_url: str | None, model: str | None) -> str:
     """Generate launchd plist content using plistlib (safe XML escaping)."""
     import plistlib
 
@@ -637,8 +639,9 @@ def _get_plist_content(vault_path: str, data_path: str, provider: str, ollama_ur
         "OBSIDIAN_RAG_DATA": data_path,
         "OBSIDIAN_RAG_PROVIDER": provider,
     }
-    if provider == "ollama":
-        env_vars["OBSIDIAN_RAG_OLLAMA_URL"] = ollama_url
+    url_env = PROVIDER_URL_ENV.get(provider)
+    if url_env and base_url:
+        env_vars[url_env] = base_url
     if model:
         env_vars["OBSIDIAN_RAG_MODEL"] = model
 
@@ -651,7 +654,8 @@ def _get_plist_content(vault_path: str, data_path: str, provider: str, ollama_ur
         "ThrottleInterval": 30,
         "StandardOutPath": str(LOG_DIR / "watcher.log"),
         "StandardErrorPath": str(LOG_DIR / "watcher.err"),
-        "WorkingDirectory": str(Path.home()),
+        # Nothing in the watcher reads the cwd; use the directory the tool owns rather than the user's home
+        "WorkingDirectory": data_path,
     }
 
     return plistlib.dumps(plist_dict, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
@@ -669,13 +673,11 @@ def install_service(ctx):
     vault_path = ctx.obj["vault"]
     data_path = ctx.obj["data"]
     settings = _embedder_settings(ctx)  # validates the provider and API key before installing the service
-    provider = settings.provider
-    ollama_url = settings.base_url or ctx.obj["config"].ollama_url
     # Only an explicit --model is pinned in the plist; otherwise the service follows config.toml
     model = ctx.obj["overrides"]["model"]
 
     try:
-        _install_watcher_service(vault_path, data_path, provider, ollama_url, model, echo=click.echo)
+        _install_watcher_service(vault_path, data_path, settings.provider, settings.base_url, model, echo=click.echo)
     except ServiceInstallError as e:
         click.echo(f"Error loading service: {e}", err=True)
         sys.exit(1)

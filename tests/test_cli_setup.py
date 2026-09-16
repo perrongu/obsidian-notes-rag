@@ -18,7 +18,7 @@ import pytest
 from click.testing import CliRunner, Result
 
 from obsidian_rag.cli import PLIST_NAME, WRAPPER_SCRIPT_NAME, main
-from obsidian_rag.config import Config
+from obsidian_rag.config import PROVIDER_URL_ENV, Config, load_config
 from obsidian_rag.defaults import DEFAULT_LMSTUDIO_MODEL
 
 OK = CompletedProcess([], 0, "", "")
@@ -165,6 +165,7 @@ class TestProviderSelection:
         from obsidian_rag.indexer import PROVIDERS
 
         assert set(PROVIDER_LABELS) == set(PROVIDERS) == set(_PROVIDER_PROMPTS)
+        assert set(PROVIDER_URL_ENV) == set(PROVIDERS) - {"openai"}
 
 
 class TestVaultAndConfigFile:
@@ -205,6 +206,7 @@ class TestServiceInstall:
 
         assert result.exit_code == 0, result.output
         assert wizard_env.log_dir.is_dir()
+        assert wizard_env.data_dir.is_dir()  # launchd chdirs into WorkingDirectory before the job starts
         assert wizard_env.wrapper_path.exists() and wizard_env.wrapper_path.stat().st_mode & 0o111
         assert wizard_env.launchctl_calls == [("load", wizard_env.plist_path)]
         plist = _plist(wizard_env)
@@ -214,7 +216,24 @@ class TestServiceInstall:
             "OBSIDIAN_RAG_PROVIDER": "openai",
         }
         assert plist["StandardOutPath"] == str(wizard_env.log_dir / "watcher.log")
+        assert plist["WorkingDirectory"] == str(wizard_env.data_dir)
         assert f"Logs: {wizard_env.log_dir}/watcher.log" in result.output
+
+    @pytest.mark.parametrize(
+        ("choice", "provider", "url"),
+        [("2", "ollama", "http://ollama.local:11434"), ("3", "lmstudio", "http://lm.local:1234")],
+        ids=["ollama", "lmstudio"],
+    )
+    def test_wizard_pins_the_chosen_provider_url_under_its_own_key(self, wizard_env, choice, provider, url):
+        result = run_setup(f"{choice}\n{url}\n\n{wizard_env.vault}\n\nn\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert _plist(wizard_env)["EnvironmentVariables"] == {
+            "OBSIDIAN_RAG_VAULT": str(wizard_env.vault.resolve()),
+            "OBSIDIAN_RAG_DATA": str(wizard_env.data_dir),
+            "OBSIDIAN_RAG_PROVIDER": provider,
+            PROVIDER_URL_ENV[provider]: url,
+        }
 
     def test_install_service_reloads_existing_plist_and_reports_launchctl_failure(
         self, wizard_env, monkeypatch: pytest.MonkeyPatch
@@ -257,5 +276,30 @@ class TestServiceInstall:
         assert f"Created: {wizard_env.plist_path}" in result.output
         assert "Service installed and started." in result.output
         assert wizard_env.log_dir.is_dir()
-        assert _plist(wizard_env)["EnvironmentVariables"]["OBSIDIAN_RAG_MODEL"] == "pinned"
+        plist = _plist(wizard_env)
+        assert plist["EnvironmentVariables"]["OBSIDIAN_RAG_MODEL"] == "pinned"
+        assert plist["WorkingDirectory"] == str(wizard_env.data_dir)
         assert wizard_env.launchctl_calls == [("load", wizard_env.plist_path)]
+
+    def test_install_service_command_pins_lmstudio_url_under_its_own_key(self, wizard_env, monkeypatch):
+        config = Config(vault_path=str(wizard_env.vault), data_path=str(wizard_env.data_dir))
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
+
+        result = CliRunner().invoke(
+            main, ["--provider", "lmstudio", "--lmstudio-url", "http://lm:1234", "install-service"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert wizard_env.data_dir.is_dir()
+        env_vars = _plist(wizard_env)["EnvironmentVariables"]
+        assert env_vars == {
+            "OBSIDIAN_RAG_VAULT": str(wizard_env.vault),
+            "OBSIDIAN_RAG_DATA": str(wizard_env.data_dir),
+            "OBSIDIAN_RAG_PROVIDER": "lmstudio",
+            "OBSIDIAN_RAG_LMSTUDIO_URL": "http://lm:1234",
+        }
+        # The watcher starts from these variables: load_config must read the pinned URL back
+        for name, value in env_vars.items():
+            monkeypatch.setenv(name, value)
+        watcher_config = load_config()
+        assert (watcher_config.provider, watcher_config.lmstudio_url) == ("lmstudio", "http://lm:1234")
