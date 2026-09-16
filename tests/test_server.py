@@ -8,8 +8,10 @@ from unittest.mock import MagicMock
 import pytest
 from mcp.client import Client
 
+import obsidian_rag
 from obsidian_rag import server
 from obsidian_rag.config import Config
+from obsidian_rag.indexer import IndexerConfig
 
 EXPECTED_TOOLS = {"search_notes", "get_similar", "get_note_context", "get_stats", "reindex"}
 THREAD_COUNT = 8
@@ -29,22 +31,32 @@ def reset_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "load_config", _forbid_host_config)
 
 
-def _list_tools():
+def _with_client(action):
+    """Run ``action(client)`` against an in-process client connected to the server."""
+
     async def run():
         async with Client(server.mcp) as client:
-            return await client.list_tools()
+            return await action(client)
 
-    return {tool.name: tool for tool in asyncio.run(run()).tools}
+    return asyncio.run(run())
+
+
+def _list_tools():
+    result = _with_client(lambda client: client.list_tools())
+    return {tool.name: tool for tool in result.tools}
+
+
+def _server_version() -> str:
+    async def read(client) -> str:
+        assert client.server_info is not None
+        return client.server_info.version
+
+    return _with_client(read)
 
 
 def _call_tool(name: str, arguments: dict):
     """Call a tool the way a real client does: through the request handler, not the tool manager."""
-
-    async def run():
-        async with Client(server.mcp) as client:
-            return await client.call_tool(name, arguments)
-
-    return asyncio.run(run())
+    return _with_client(lambda client: client.call_tool(name, arguments))
 
 
 def _text(result) -> str:
@@ -68,6 +80,21 @@ class TestToolRegistration:
         schema = _list_tools()["search_notes"].input_schema
         assert schema["required"] == ["query"]
         assert set(schema["properties"]) == {"query", "limit", "note_type"}
+
+    def test_optional_parameters_have_concrete_types(self):
+        """Claude Code rejects omitted ``anyOf [T, null]`` parameters, so every optional must be ``{type, default}``."""
+        for name, tool in _list_tools().items():
+            schema = tool.input_schema
+            for prop_name, prop in schema["properties"].items():
+                if prop_name in schema.get("required", []):
+                    continue
+                assert "anyOf" not in prop, f"{name}.{prop_name} is nullable"
+                assert "type" in prop, f"{name}.{prop_name} has no concrete type"
+                assert prop.get("default") is not None, f"{name}.{prop_name} defaults to null"
+
+    def test_server_advertises_package_version(self):
+        assert obsidian_rag.__version__ != ""
+        assert _server_version() == obsidian_rag.__version__
 
     def test_tool_descriptions_come_from_docstrings(self):
         assert _list_tools()["reindex"].description.startswith("Re-index the Obsidian vault.")
@@ -143,6 +170,36 @@ class TestSearchNotes:
         embedder.embed.assert_called_once_with("hello", task_type="search_query")
         store.search.assert_called_once_with([0.1, 0.2, 0.3], limit=5, where={"type": "note"})
 
+    def test_omitted_arguments_fall_back_to_config_defaults(self, monkeypatch: pytest.MonkeyPatch):
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.1]
+        store = MagicMock()
+        store.search.return_value = []
+        monkeypatch.setattr(server, "_config", Config())
+        monkeypatch.setattr(server, "_embedder", embedder)
+        monkeypatch.setattr(server, "_store", store)
+
+        result = _call_tool("search_notes", {"query": "hello"})
+
+        assert result.is_error is False
+        assert result.structured_content == {"result": []}
+        store.search.assert_called_once_with([0.1], limit=Config().indexer.default_search_limit, where=None)
+
+    def test_explicit_null_arguments_behave_like_omitted(self, monkeypatch: pytest.MonkeyPatch):
+        """Some clients send ``null`` for every optional argument they do not set."""
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.1]
+        store = MagicMock()
+        store.search.return_value = []
+        monkeypatch.setattr(server, "_config", Config())
+        monkeypatch.setattr(server, "_embedder", embedder)
+        monkeypatch.setattr(server, "_store", store)
+
+        result = _call_tool("search_notes", {"query": "hello", "limit": None, "note_type": None})
+
+        assert result.is_error is False
+        store.search.assert_called_once_with([0.1], limit=Config().indexer.default_search_limit, where=None)
+
 
 class TestGetSimilar:
     def test_unknown_note_is_an_error_result(self, monkeypatch: pytest.MonkeyPatch):
@@ -156,6 +213,22 @@ class TestGetSimilar:
 
         assert result.is_error is True
         assert "Note not found: missing.md" in _text(result)
+
+    def test_omitted_limit_falls_back_to_config_default(self, monkeypatch: pytest.MonkeyPatch):
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.5]
+        store = MagicMock()
+        store.get_by_file.return_value = [_hit("a.md", "body", 0.0)]
+        store.search.return_value = []
+        monkeypatch.setattr(server, "_config", Config())
+        monkeypatch.setattr(server, "_embedder", embedder)
+        monkeypatch.setattr(server, "_store", store)
+
+        result = _call_tool("get_similar", {"note_path": "a.md"})
+
+        assert result.is_error is False
+        expected_limit = Config().indexer.default_similar_limit + server._SIMILAR_OVERFETCH
+        store.search.assert_called_once_with([0.5], limit=expected_limit)
 
 
 class TestGetNoteContext:
@@ -177,6 +250,20 @@ class TestGetNoteContext:
             "content": "part one\n\npart two",
             "similar_notes": [{"file_path": "b.md", "heading": "Why", "preview": "related", "similarity": 0.7}],
         }
+
+    def test_zero_context_limit_in_config_returns_no_similar_notes(self, monkeypatch: pytest.MonkeyPatch):
+        """A configured limit of 0 must not be re-resolved to the similar-notes default."""
+        store = MagicMock()
+        store.get_by_file.return_value = [_hit("a.md", "body", 0.0)]
+        monkeypatch.setattr(server, "_config", Config(indexer=IndexerConfig(default_context_limit=0)))
+        monkeypatch.setattr(server, "_embedder", MagicMock())
+        monkeypatch.setattr(server, "_store", store)
+
+        result = _call_tool("get_note_context", {"note_path": "a.md"})
+
+        assert result.is_error is False
+        assert _json_content(result)["similar_notes"] == []
+        store.search.assert_not_called()
 
 
 class TestReindex:
@@ -224,7 +311,24 @@ class TestReindex:
         assert payload["files_indexed"] == 1
         assert payload["cleared"] is True
         assert payload["total_in_store"] == 1
+        assert payload["path_filter"] is None
         store.clear.assert_called_once()
+
+    def test_explicit_null_path_filter_indexes_whole_vault(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
+        (tmp_path / "note.md").write_text("# Title\n\nbody")
+        embedder = MagicMock()
+        embedder.embed_batch.return_value = [[0.1]]
+        embedder.embed.return_value = [0.1]
+        store = MagicMock()
+        store.get_stats.return_value = {"count": 1}
+        monkeypatch.setattr(server, "_config", Config(vault_path=str(tmp_path)))
+        monkeypatch.setattr(server, "_embedder", embedder)
+        monkeypatch.setattr(server, "_store", store)
+
+        result = _call_tool("reindex", {"path_filter": None})
+
+        assert result.is_error is False
+        assert _json_content(result)["files_indexed"] == 1
         assert server._reindex_lock.acquire(blocking=False)
         server._reindex_lock.release()
 

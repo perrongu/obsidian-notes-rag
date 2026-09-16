@@ -7,11 +7,13 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import ParamSpec, TypeVar
+from typing import Annotated, ParamSpec, TypeVar
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import BeforeValidator
 
+from . import __version__
 from .config import Config, load_config
 from .embedders import resolve_embedder_settings
 from .indexer import Embedder, VaultIndexer
@@ -20,7 +22,7 @@ from .store import VectorStore
 logger = logging.getLogger(__name__)
 
 # Create MCP server
-mcp = MCPServer("obsidian-rag")
+mcp = MCPServer("obsidian-rag", version=__version__)
 
 # Shared instances, created on first use. mcp 2.x runs synchronous tools on
 # worker threads, so each instance has its own lock. get_config() never takes
@@ -44,6 +46,18 @@ _SIMILAR_OVERFETCH = 10
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+# Optional tool arguments use concrete sentinel defaults (0 / "") instead of
+# ``X | None = None``: the SDK publishes ``X | None`` as ``anyOf [X, null]`` and
+# some MCP clients (Claude Code) then reject calls that omit the argument. The
+# validators keep an explicit ``null`` working by mapping it to the sentinel.
+_OptionalInt = Annotated[int, BeforeValidator(lambda v: 0 if v is None else v)]
+_OptionalStr = Annotated[str, BeforeValidator(lambda v: "" if v is None else v)]
+
+
+def _resolve_limit(limit: int, default: int) -> int:
+    """A limit of 0 (or less) means "not provided" and falls back to the config default."""
+    return limit if limit > 0 else default
 
 
 def get_config() -> Config:
@@ -105,13 +119,13 @@ def _similarity(result: dict) -> float:
 
 @mcp.tool()
 @_raise_tool_errors
-def search_notes(query: str, limit: int | None = None, note_type: str | None = None) -> list[dict]:
+def search_notes(query: str, limit: _OptionalInt = 0, note_type: _OptionalStr = "") -> list[dict]:
     """Search notes using semantic similarity.
 
     Args:
         query: Search query text
-        limit: Maximum number of results (default: from config)
-        note_type: Optional filter - "daily" or "note"
+        limit: Maximum number of results (0 = default from config)
+        note_type: Filter by note type, "daily" or "note" (empty = no filter)
 
     Returns:
         List of matching notes with content, file path, and similarity score
@@ -120,9 +134,7 @@ def search_notes(query: str, limit: int | None = None, note_type: str | None = N
     embedder = get_embedder()
     store = get_store()
 
-    if limit is None:
-        limit = config.indexer.default_search_limit
-
+    limit = _resolve_limit(limit, config.indexer.default_search_limit)
     query_embedding = embedder.embed(query, task_type="search_query")
     where = {"type": note_type} if note_type else None
     results = store.search(query_embedding, limit=limit, where=where)
@@ -143,26 +155,30 @@ def search_notes(query: str, limit: int | None = None, note_type: str | None = N
 
 @mcp.tool()
 @_raise_tool_errors
-def get_similar(note_path: str, limit: int | None = None) -> list[dict]:
+def get_similar(note_path: str, limit: _OptionalInt = 0) -> list[dict]:
     """Find notes similar to the given note.
 
     Args:
         note_path: Path to the note (relative to vault root)
-        limit: Number of similar notes to return (default: from config)
+        limit: Number of similar notes to return (0 = default from config)
 
     Returns:
         List of similar notes with content preview and similarity score
     """
-    config = get_config()
+    limit = _resolve_limit(limit, get_config().indexer.default_similar_limit)
+    return _similar_notes(note_path, limit)
+
+
+def _similar_notes(note_path: str, limit: int) -> list[dict]:
+    """Shared body of ``get_similar``; ``limit`` is already resolved (0 = no similar notes)."""
     embedder = get_embedder()
     store = get_store()
-
-    if limit is None:
-        limit = config.indexer.default_similar_limit
 
     results = store.get_by_file(note_path)
     if not results:
         raise ToolError(f"Note not found: {note_path}")
+    if limit <= 0:
+        return []
 
     note_content = "\n\n".join(r["content"] for r in results)
     note_embedding = embedder.embed(note_content[:_SIMILAR_EMBED_CHARS])
@@ -183,21 +199,19 @@ def get_similar(note_path: str, limit: int | None = None) -> list[dict]:
 
 @mcp.tool()
 @_raise_tool_errors
-def get_note_context(note_path: str, limit: int | None = None) -> dict:
+def get_note_context(note_path: str, limit: _OptionalInt = 0) -> dict:
     """Get a note and its related context.
 
     Args:
         note_path: Path to the note (relative to vault root)
-        limit: Number of similar notes to include (default: from config)
+        limit: Number of similar notes to include (0 = default from config)
 
     Returns:
         Note content and list of similar notes for context
     """
     config = get_config()
     store = get_store()
-
-    if limit is None:
-        limit = config.indexer.default_context_limit
+    limit = _resolve_limit(limit, config.indexer.default_context_limit)
 
     results = store.get_by_file(note_path)
     if not results:
@@ -208,7 +222,7 @@ def get_note_context(note_path: str, limit: int | None = None) -> dict:
     return {
         "file_path": note_path,
         "content": note_content,
-        "similar_notes": get_similar(note_path, limit=limit),
+        "similar_notes": _similar_notes(note_path, limit),
     }
 
 
@@ -255,7 +269,7 @@ def _index_files(indexer: VaultIndexer, store: VectorStore, files: list[Path]) -
 
 @mcp.tool()
 @_raise_tool_errors
-def reindex(clear: bool = False, path_filter: str | None = None) -> dict:
+def reindex(clear: bool = False, path_filter: _OptionalStr = "") -> dict:
     """Re-index the Obsidian vault.
 
     Only one reindex runs at a time; a second call while one is in progress
@@ -263,7 +277,7 @@ def reindex(clear: bool = False, path_filter: str | None = None) -> dict:
 
     Args:
         clear: If True, clear existing index before re-indexing (default: False)
-        path_filter: Optional path prefix to limit indexing (e.g., "Daily Notes/")
+        path_filter: Path prefix to limit indexing, e.g. "Daily Notes/" (empty = whole vault)
 
     Returns:
         Statistics about the indexing operation
@@ -296,7 +310,7 @@ def reindex(clear: bool = False, path_filter: str | None = None) -> dict:
         "chunks_created": chunk_count,
         "total_in_store": store.get_stats()["count"],
         "errors": errors if errors else None,
-        "path_filter": path_filter,
+        "path_filter": path_filter or None,
         "cleared": clear,
     }
 
