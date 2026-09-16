@@ -127,8 +127,8 @@ class TestTruncateForEmbedding:
             raise AssertionError("tokenizer must not run for text under the byte limit")
 
         monkeypatch.setattr(tiktoken, "encoding_for_model", must_not_tokenize)
-        monkeypatch.setattr(tiktoken, "get_encoding", must_not_tokenize)
-        text = "é" * (_OPENAI_MAX_TOKENS // 2)  # 2 bytes per char: exactly at the byte limit
+        text = "é" * (_OPENAI_MAX_TOKENS // 2) + "a"  # 2 bytes per "é" plus 1: exactly _OPENAI_MAX_TOKENS bytes
+        assert len(text.encode("utf-8")) == _OPENAI_MAX_TOKENS
         assert _truncate_for_embedding(text) == text
 
     def test_tokenizes_when_the_text_exceeds_the_byte_limit_but_not_the_token_limit(self):
