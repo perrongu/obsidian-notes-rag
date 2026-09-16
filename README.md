@@ -31,7 +31,7 @@ As an MCP server, it gives any compatible AI assistant the same capabilities —
 uvx obsidian-notes-rag setup
 ```
 
-This creates a config at `~/.config/obsidian-notes-rag/config.toml` with your vault path, embedding provider, and API key.
+This creates a config at `~/Library/Application Support/obsidian-notes-rag/config.toml` on macOS (`~/.config/obsidian-notes-rag/config.toml` on Linux) with your vault path, embedding provider, and API key.
 
 ### 2. Build the index
 
@@ -153,7 +153,7 @@ obsidian-rag --provider lmstudio index
 
 ## Configuration
 
-The setup wizard writes to `~/.config/obsidian-notes-rag/config.toml`. You can also override with environment variables:
+The setup wizard writes to `~/Library/Application Support/obsidian-notes-rag/config.toml` on macOS (`~/.config/obsidian-notes-rag/config.toml` on Linux). You can also override with environment variables:
 
 | Variable | Description |
 |----------|-------------|
