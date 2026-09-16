@@ -209,6 +209,17 @@ class TestVaultAndConfigFile:
         assert "✓ Vault found" in result.output
         assert "markdown files" not in result.output
 
+    def test_relative_vault_path_is_canonical_for_the_whole_run(self, wizard_env, monkeypatch, tmp_path: Path):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.chdir(tmp_path)
+
+        result = run_setup("1\nn\nvault\n\nn\n\n")
+
+        assert result.exit_code == 0, result.output
+        canonical = str(wizard_env.vault.resolve())
+        assert _config(wizard_env)["vault_path"] == canonical
+        assert _plist(wizard_env)["EnvironmentVariables"]["OBSIDIAN_RAG_VAULT"] == canonical
+
     def test_existing_config_overwrite_declined(self, wizard_env):
         wizard_env.config_path.parent.mkdir(parents=True)
         wizard_env.config_path.write_text('provider = "ollama"\n')
@@ -368,6 +379,39 @@ class TestServiceInstall:
         assert plist["EnvironmentVariables"]["OBSIDIAN_RAG_MODEL"] == "pinned"
         assert plist["WorkingDirectory"] == str(wizard_env.data_dir)
         assert wizard_env.launchctl_calls == [("load", wizard_env.plist_path)]
+
+    @pytest.mark.parametrize(
+        ("home", "given", "expected"),
+        [(None, "rel/dir", "rel/dir"), ("home", "~/idx", "home/idx")],
+        ids=["relative", "tilde"],
+    )
+    def test_install_service_writes_absolute_paths_for_data_option(
+        self, wizard_env, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, home, given, expected
+    ):
+        """launchd resolves a relative WorkingDirectory from /, so the service would never start."""
+        config = Config(vault_path=str(wizard_env.vault), openai_api_key="k")
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
+        monkeypatch.chdir(tmp_path)
+        if home:
+            monkeypatch.setenv("HOME", str(tmp_path / home))
+
+        result = CliRunner().invoke(main, ["--data", given, "install-service"])
+
+        assert result.exit_code == 0, result.output
+        plist = _plist(wizard_env)
+        assert plist["EnvironmentVariables"]["OBSIDIAN_RAG_DATA"] == str(tmp_path / expected)
+        assert plist["WorkingDirectory"] == str(tmp_path / expected)
+        assert (tmp_path / expected).is_dir()
+
+    def test_install_service_writes_absolute_path_for_vault_option(self, wizard_env, monkeypatch, tmp_path: Path):
+        config = Config(data_path=str(wizard_env.data_dir), openai_api_key="k")
+        monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(main, ["--vault", "vault", "install-service"])
+
+        assert result.exit_code == 0, result.output
+        assert _plist(wizard_env)["EnvironmentVariables"]["OBSIDIAN_RAG_VAULT"] == str(tmp_path / "vault")
 
     def test_install_service_command_pins_lmstudio_url_under_its_own_key(self, wizard_env, monkeypatch):
         config = Config(vault_path=str(wizard_env.vault), data_path=str(wizard_env.data_dir))

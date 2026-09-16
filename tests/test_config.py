@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from obsidian_rag import defaults
-from obsidian_rag.config import Config, load_config, save_config
+from obsidian_rag.config import Config, absolute_path, load_config, save_config
 from obsidian_rag.indexer import LMStudioEmbedder, OllamaEmbedder
 
 
@@ -61,6 +61,20 @@ class TestSaveConfig:
         assert data["openai"] == {"api_key": "k", "model": "text-embedding-3-large"}
 
 
+class TestAbsolutePath:
+    def test_tilde_is_expanded(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert absolute_path("~/idx") == str(tmp_path / "idx")
+
+    def test_relative_path_is_anchored_to_the_cwd(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        monkeypatch.chdir(tmp_path)
+        assert absolute_path("rel/idx") == str(tmp_path / "rel" / "idx")
+
+    def test_absolute_path_is_unchanged_even_when_missing(self, tmp_path: Path):
+        missing = tmp_path / "nope" / "idx"
+        assert absolute_path(str(missing)) == str(missing)
+
+
 class TestLoadConfig:
     def test_missing_file_gives_defaults(self):
         assert load_config() == Config()
@@ -75,6 +89,18 @@ class TestLoadConfig:
         assert load_config() == Config(
             provider="lmstudio", vault_path=str(vault.resolve()), lmstudio_url="http://l:2", lmstudio_model="m"
         )
+
+    def test_env_data_path_is_made_absolute(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("OBSIDIAN_RAG_DATA", "~/idx")
+
+        assert load_config().data_path == str(tmp_path / "idx")
+
+    def test_toml_data_path_is_made_absolute(self, isolated_config_file: Path, monkeypatch, tmp_path: Path):
+        isolated_config_file.write_text('provider = "openai"\ndata_path = "rel/idx"\n')
+        monkeypatch.chdir(tmp_path)
+
+        assert load_config().data_path == str(tmp_path / "rel" / "idx")
 
     def test_openai_section_without_api_key_keeps_model_and_no_key(self, isolated_config_file: Path):
         isolated_config_file.write_text('provider = "openai"\n\n[openai]\nmodel = "text-embedding-3-large"\n')

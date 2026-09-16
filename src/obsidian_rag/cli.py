@@ -16,7 +16,16 @@ import click
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-from .config import PROVIDER_URL_ENV, Config, get_config_path, get_data_dir, load_config, save_config
+from .config import (
+    PROVIDER_URL_ENV,
+    Config,
+    absolute_path,
+    get_config_path,
+    get_data_dir,
+    load_config,
+    resolve_path_case,
+    save_config,
+)
 from .defaults import (
     DEFAULT_LMSTUDIO_MODEL,
     DEFAULT_LMSTUDIO_URL,
@@ -67,8 +76,9 @@ def main(ctx, vault, data, provider, ollama_url, lmstudio_url, model):
     # Load config from file, then apply CLI overrides
     config = load_config()
 
-    ctx.obj["vault"] = vault or config.vault_path or ""
-    ctx.obj["data"] = data or config.get_data_path()
+    # CLI paths are normalized here; config.toml and the environment are normalized by load_config
+    ctx.obj["vault"] = absolute_path(vault) if vault else config.vault_path or ""
+    ctx.obj["data"] = absolute_path(data) if data else config.get_data_path()
     # Raw CLI overrides (None when absent); precedence over config is applied once, in resolve_embedder_settings
     ctx.obj["overrides"] = {
         "provider": provider,
@@ -243,7 +253,7 @@ def _prompt_vault_path() -> str | None:
 def _prompt_data_path() -> str | None:
     """Ask where to store the index; ``None`` when the default is kept so config.toml does not pin it."""
     default = str(get_data_dir())
-    data_path = os.path.expanduser(click.prompt("\nWhere to store the search index?", default=default))
+    data_path = absolute_path(click.prompt("\nWhere to store the search index?", default=default))
     return None if data_path == default else data_path
 
 
@@ -304,6 +314,7 @@ def setup():
     vault_path = _prompt_vault_path()
     if vault_path is None:
         return
+    vault_path = resolve_path_case(vault_path)  # the canonical form config.toml stores, used for the whole run
     config = Config(provider=provider, vault_path=vault_path, data_path=_prompt_data_path(), **provider_fields)
 
     click.echo(f"\n✓ Configuration saved to {save_config(config)}")
