@@ -26,6 +26,7 @@ from watchdog.observers.api import BaseObserver
 
 from . import icloud
 from .config import load_config
+from .defaults import DEFAULT_OLLAMA_URL
 from .embedders import EmbedderConfigError, EmbedderSettings, resolve_embedder_settings
 from .indexer import Embedder, IndexerConfig, VaultIndexer
 from .retry_queue import MAX_RETRIES, RETRY_BASE_DELAY, RetryQueue, process_due
@@ -50,7 +51,7 @@ def _get_config():
 logger = logging.getLogger(__name__)
 
 
-def check_ollama_health(ollama_url: str = "http://localhost:11434") -> bool:
+def check_ollama_health(ollama_url: str = DEFAULT_OLLAMA_URL) -> bool:
     """Check if Ollama is running and accessible."""
     try:
         response = httpx.get(f"{ollama_url}/api/tags", timeout=5.0)

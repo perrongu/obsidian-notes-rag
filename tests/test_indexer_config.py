@@ -1,5 +1,9 @@
 """Tests for IndexerConfig, presets, and block preservation."""
 
+from dataclasses import fields
+
+import pytest
+
 from obsidian_rag.indexer import (
     _NEWLINE_MASK,
     IndexerConfig,
@@ -27,6 +31,16 @@ class TestIndexerConfigDefaults:
         cfg = IndexerConfig(chunk_size=800)
         assert cfg.chunk_size == 800
         assert cfg.preset == "default"
+
+    @pytest.mark.parametrize("name", [f.name for f in fields(IndexerConfig)])
+    def test_make_defaults_matches_dataclass_defaults(self, name: str):
+        """The baseline used by presets and serialization must equal the declared field defaults."""
+        assert getattr(IndexerConfig._make_defaults(), name) == getattr(IndexerConfig(), name)
+
+    def test_make_defaults_for_a_preset_only_changes_the_preset_name(self):
+        base = IndexerConfig._make_defaults("math")
+        assert base.preset == "math"
+        assert base.chunk_size == IndexerConfig().chunk_size
 
 
 class TestIndexerConfigPresets:
