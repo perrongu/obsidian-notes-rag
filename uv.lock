@@ -744,7 +744,7 @@ requires-dist = [
     { name = "chonkie", specifier = ">=1.0.0" },
     { name = "click", specifier = ">=8.0.0" },
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "mcp", specifier = ">=1.0.0,<2" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "platformdirs", specifier = ">=3.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
