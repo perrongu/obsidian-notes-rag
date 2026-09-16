@@ -13,9 +13,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
 from .config import Config, get_config_path, get_data_dir, load_config, save_config
+from .embedders import EmbedderSettings, MissingApiKeyError, resolve_embedder_settings
 from .indexer import (
     VaultIndexer,
-    create_embedder,
     get_lmstudio_models,
     get_ollama_models,
     is_lmstudio_running,
@@ -24,6 +24,21 @@ from .indexer import (
 from .server import run_server
 from .store import VectorStore
 from .watcher import VaultWatcher
+
+
+def _embedder_settings(ctx: click.Context) -> EmbedderSettings:
+    """Resolve the embedder from config plus the global CLI overrides; exit cleanly if misconfigured."""
+    try:
+        return resolve_embedder_settings(
+            ctx.obj["config"],
+            provider=ctx.obj["provider"],
+            model=ctx.obj["model"],
+            ollama_url=ctx.obj["ollama_url"],
+            lmstudio_url=ctx.obj["lmstudio_url"],
+        )
+    except (MissingApiKeyError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 @click.group()
@@ -207,17 +222,7 @@ def setup():
     if click.confirm("\nRun initial indexing now?", default=True):
         click.echo("\nIndexing vault...")
         try:
-            # Create embedder based on provider
-            if config.provider == "openai":
-                embedder = create_embedder(
-                    provider="openai", model=config.openai_model, api_key=config.get_openai_api_key()
-                )
-            elif config.provider == "ollama":
-                embedder = create_embedder(provider="ollama", model=config.ollama_model, base_url=config.ollama_url)
-            else:  # lmstudio
-                embedder = create_embedder(
-                    provider="lmstudio", model=config.lmstudio_model, base_url=config.lmstudio_url
-                )
+            embedder = resolve_embedder_settings(config).create()
 
             store = VectorStore(data_path=config.get_data_path())
             indexer = VaultIndexer(vault_path=config.vault_path, embedder=embedder, config=config.indexer)
@@ -311,39 +316,16 @@ def index(ctx, clear, path_filter):
         click.echo("Error: No vault path configured. Run 'obsidian-rag setup' first.", err=True)
         sys.exit(1)
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
     config = ctx.obj["config"]
-
-    # Get model from CLI override or config file based on provider
-    model = ctx.obj["model"]
-    if model is None:
-        if provider == "openai":
-            model = config.openai_model
-        elif provider == "ollama":
-            model = config.ollama_model
-        elif provider == "lmstudio":
-            model = config.lmstudio_model
+    settings = _embedder_settings(ctx)
 
     click.echo(f"Indexing vault: {vault_path}")
     click.echo(f"Data path: {data_path}")
-    click.echo(f"Provider: {provider}")
-    click.echo(f"Model: {model}")
-
-    # Determine the correct base_url based on provider
-    if provider == "ollama":
-        base_url = ollama_url
-    elif provider == "lmstudio":
-        base_url = lmstudio_url
-    else:
-        base_url = None
-
-    # Resolve API key for OpenAI (config → env → Keychain)
-    api_key = config.get_openai_api_key() if provider == "openai" else None
+    click.echo(f"Provider: {settings.provider}")
+    click.echo(f"Model: {settings.model}")
 
     # Initialize components
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+    embedder = settings.create()
     store = VectorStore(data_path=data_path)
     indexer = VaultIndexer(vault_path=vault_path, embedder=embedder, config=config.indexer)
 
@@ -400,32 +382,7 @@ def index(ctx, clear, path_filter):
 def search(ctx, query, limit, note_type):
     """Search notes semantically."""
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
-    config = ctx.obj["config"]
-
-    # Get model from CLI override or config file based on provider
-    model = ctx.obj["model"]
-    if model is None:
-        if provider == "openai":
-            model = config.openai_model
-        elif provider == "ollama":
-            model = config.ollama_model
-        elif provider == "lmstudio":
-            model = config.lmstudio_model
-
-    # Determine the correct base_url based on provider
-    if provider == "ollama":
-        base_url = ollama_url
-    elif provider == "lmstudio":
-        base_url = lmstudio_url
-    else:
-        base_url = None
-
-    # Initialize components
-    api_key = config.get_openai_api_key() if provider == "openai" else None
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+    embedder = _embedder_settings(ctx).create()
     store = VectorStore(data_path=data_path)
 
     # Generate query embedding
@@ -474,29 +431,7 @@ def search(ctx, query, limit, note_type):
 def similar(ctx, note_path, limit):
     """Find notes similar to a given note."""
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
-    config = ctx.obj["config"]
-
-    model = ctx.obj["model"]
-    if model is None:
-        if provider == "openai":
-            model = config.openai_model
-        elif provider == "ollama":
-            model = config.ollama_model
-        elif provider == "lmstudio":
-            model = config.lmstudio_model
-
-    if provider == "ollama":
-        base_url = ollama_url
-    elif provider == "lmstudio":
-        base_url = lmstudio_url
-    else:
-        base_url = None
-
-    api_key = config.get_openai_api_key() if provider == "openai" else None
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+    embedder = _embedder_settings(ctx).create()
     store = VectorStore(data_path=data_path)
 
     click.echo(f"Finding notes similar to: {note_path}\n")
@@ -541,29 +476,7 @@ def similar(ctx, note_path, limit):
 def context(ctx, note_path, limit):
     """Get a note and its related context."""
     data_path = ctx.obj["data"]
-    provider = ctx.obj["provider"]
-    ollama_url = ctx.obj["ollama_url"]
-    lmstudio_url = ctx.obj["lmstudio_url"]
-    config = ctx.obj["config"]
-
-    model = ctx.obj["model"]
-    if model is None:
-        if provider == "openai":
-            model = config.openai_model
-        elif provider == "ollama":
-            model = config.ollama_model
-        elif provider == "lmstudio":
-            model = config.lmstudio_model
-
-    if provider == "ollama":
-        base_url = ollama_url
-    elif provider == "lmstudio":
-        base_url = lmstudio_url
-    else:
-        base_url = None
-
-    api_key = config.get_openai_api_key() if provider == "openai" else None
-    embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+    embedder = _embedder_settings(ctx).create()
     store = VectorStore(data_path=data_path)
 
     click.echo(f"Getting context for: {note_path}\n")

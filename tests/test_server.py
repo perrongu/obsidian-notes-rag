@@ -207,20 +207,6 @@ class TestReindex:
         server._reindex_lock.release()
 
 
-class TestBuildEmbedder:
-    def test_openai_without_key_fails_fast(self, monkeypatch: pytest.MonkeyPatch):
-        config = Config(provider="openai")
-        monkeypatch.setattr(Config, "get_openai_api_key", lambda self: None)
-        with pytest.raises(RuntimeError, match="OPENAI_API_KEY not set"):
-            server._build_embedder(config)
-
-    def test_ollama_uses_configured_url_and_model(self, monkeypatch: pytest.MonkeyPatch):
-        factory = MagicMock()
-        monkeypatch.setattr(server, "create_embedder", factory)
-        server._build_embedder(Config(provider="ollama", ollama_url="http://ollama:1", ollama_model="nomic"))
-        factory.assert_called_once_with(provider="ollama", model="nomic", base_url="http://ollama:1", api_key=None)
-
-
 def _run_in_threads(fn, count: int) -> tuple[list, list[BaseException]]:
     results: list = []
     errors: list[BaseException] = []

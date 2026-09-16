@@ -20,7 +20,7 @@ def isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Config:
     """
     vault_path = tmp_path / "vault"
     vault_path.mkdir()
-    config = Config(vault_path=str(vault_path), data_path=str(tmp_path / "data"))
+    config = Config(vault_path=str(vault_path), data_path=str(tmp_path / "data"), openai_api_key="test-key")
     monkeypatch.setattr("obsidian_rag.cli.load_config", lambda: config)
     for name in ("OBSIDIAN_RAG_VAULT", "OBSIDIAN_RAG_DATA", "OBSIDIAN_RAG_PROVIDER", "OBSIDIAN_RAG_MODEL"):
         monkeypatch.delenv(name, raising=False)
@@ -32,7 +32,7 @@ class TestIndexCommand:
         """Verify --path-filter option is accepted and passed through."""
         runner = CliRunner()
         with (
-            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.embedders.create_embedder") as mock_embedder,
             patch("obsidian_rag.cli.VectorStore") as mock_store,
             patch("obsidian_rag.cli.VaultIndexer") as mock_indexer,
         ):
@@ -51,7 +51,7 @@ class TestSimilarCommand:
         """Verify similar command accepts note-path and displays results."""
         runner = CliRunner()
         with (
-            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.embedders.create_embedder") as mock_embedder,
             patch("obsidian_rag.cli.VectorStore") as mock_store,
         ):
             embedder_instance = MagicMock()
@@ -82,7 +82,7 @@ class TestContextCommand:
         """Verify context command shows note content and similar notes."""
         runner = CliRunner()
         with (
-            patch("obsidian_rag.cli.create_embedder") as mock_embedder,
+            patch("obsidian_rag.embedders.create_embedder") as mock_embedder,
             patch("obsidian_rag.cli.VectorStore") as mock_store,
         ):
             embedder_instance = MagicMock()
@@ -107,3 +107,16 @@ class TestContextCommand:
             assert result.exit_code == 0
             assert "Note content here" in result.output
             assert "related.md" in result.output
+
+
+class TestEmbedderResolution:
+    def test_missing_openai_key_exits_with_clear_error(self, isolated_config, monkeypatch: pytest.MonkeyPatch):
+        """Every embedding command shares one resolution path with one readable error."""
+        isolated_config.openai_api_key = None
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr("obsidian_rag.config._get_keychain_value", lambda *_: None)
+
+        result = CliRunner().invoke(main, ["search", "anything"])
+
+        assert result.exit_code == 1
+        assert "OPENAI_API_KEY not set" in result.output
